@@ -1,0 +1,11 @@
+# ===== LLM OPS =====
+artifacts/
+**/*.bak.*
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+# macOS
+.DS_Store
