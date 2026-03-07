@@ -74,6 +74,20 @@ class ShootGame:
 
     BOMB_RESTOCK_FLASH_FRAMES = 24
 
+    # ============================================================
+    # Mobile virtual controls (left-hand triangular area)
+    # ============================================================
+    MOBILE_CTRL_LEFT = 0
+    MOBILE_CTRL_BOTTOM = HEIGHT - 1
+    MOBILE_CTRL_TOP = HEIGHT - 156
+    MOBILE_CTRL_RIGHT = 126
+
+    MOBILE_LASER_CX = 38
+    MOBILE_LASER_CY = HEIGHT - 108
+    MOBILE_BOMB_CX = 58
+    MOBILE_BOMB_CY = HEIGHT - 58
+    MOBILE_BTN_R = 22
+
     ENEMY_SPRITE_COLUMNS = {
         "basic": 0,
         "zigzag": 1,
@@ -186,6 +200,9 @@ class ShootGame:
         self.laser_cooldown_frames = 24
         self.laser_cooldown = 0
 
+        self.prev_mobile_bomb_pressed = False
+        self.prev_mobile_laser_pressed = False
+
         self.boss_intro_timer = 0
         self.boss_event_started = False
         self.boss_defeated = False
@@ -254,6 +271,94 @@ class ShootGame:
                 ]
             )
         return stars
+
+    # ============================================================
+    # Mobile control helpers
+    # ============================================================
+    def _point_in_circle(self, px: float, py: float, cx: float, cy: float, r: float) -> bool:
+        dx = px - cx
+        dy = py - cy
+        return dx * dx + dy * dy <= r * r
+
+    def _mobile_control_vertices(self) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:
+        return (
+            (self.MOBILE_CTRL_LEFT, self.MOBILE_CTRL_BOTTOM),
+            (self.MOBILE_CTRL_LEFT, self.MOBILE_CTRL_TOP),
+            (self.MOBILE_CTRL_RIGHT, self.MOBILE_CTRL_BOTTOM),
+        )
+
+    def _point_in_triangle(
+        self,
+        px: float,
+        py: float,
+        ax: float,
+        ay: float,
+        bx: float,
+        by: float,
+        cx: float,
+        cy: float,
+    ) -> bool:
+        def sign(x1: float, y1: float, x2: float, y2: float, x3: float, y3: float) -> float:
+            return (x1 - x3) * (y2 - y3) - (x2 - x3) * (y1 - y3)
+
+        d1 = sign(px, py, ax, ay, bx, by)
+        d2 = sign(px, py, bx, by, cx, cy)
+        d3 = sign(px, py, cx, cy, ax, ay)
+
+        has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
+        has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
+        return not (has_neg and has_pos)
+
+    def _is_touch_in_mobile_control_area(self) -> bool:
+        if not pyxel.btn(pyxel.MOUSE_BUTTON_LEFT):
+            return False
+
+        (ax, ay), (bx, by), (cx, cy) = self._mobile_control_vertices()
+        return self._point_in_triangle(
+            float(pyxel.mouse_x),
+            float(pyxel.mouse_y),
+            float(ax),
+            float(ay),
+            float(bx),
+            float(by),
+            float(cx),
+            float(cy),
+        )
+
+    def _is_mobile_laser_pressed(self) -> bool:
+        if not pyxel.btn(pyxel.MOUSE_BUTTON_LEFT):
+            return False
+        return self._point_in_circle(
+            float(pyxel.mouse_x),
+            float(pyxel.mouse_y),
+            float(self.MOBILE_LASER_CX),
+            float(self.MOBILE_LASER_CY),
+            float(self.MOBILE_BTN_R),
+        )
+
+    def _is_mobile_bomb_pressed(self) -> bool:
+        if not pyxel.btn(pyxel.MOUSE_BUTTON_LEFT):
+            return False
+        return self._point_in_circle(
+            float(pyxel.mouse_x),
+            float(pyxel.mouse_y),
+            float(self.MOBILE_BOMB_CX),
+            float(self.MOBILE_BOMB_CY),
+            float(self.MOBILE_BTN_R),
+        )
+
+    def _update_mobile_action_buttons(self) -> None:
+        laser_pressed = self._is_mobile_laser_pressed()
+        bomb_pressed = self._is_mobile_bomb_pressed()
+
+        if laser_pressed and not self.prev_mobile_laser_pressed:
+            self._try_activate_homing_laser()
+
+        if bomb_pressed and not self.prev_mobile_bomb_pressed:
+            self._try_activate_bomb()
+
+        self.prev_mobile_laser_pressed = laser_pressed
+        self.prev_mobile_bomb_pressed = bomb_pressed
 
     # ============================================================
     # Enemy bullet safety
@@ -623,7 +728,7 @@ class ShootGame:
             self.player.y += self.player.speed_y
 
         self.touch_active = pyxel.btn(pyxel.MOUSE_BUTTON_LEFT)
-        if self.touch_active:
+        if self.touch_active and not self._is_touch_in_mobile_control_area():
             self.player.x = float(pyxel.mouse_x)
             self.player.y = float(pyxel.mouse_y)
 
@@ -631,7 +736,9 @@ class ShootGame:
         self.player.y = min(max(self.player.y, top_bound), bottom_bound)
 
     def _update_shooting(self) -> None:
-        wants_fire = pyxel.btn(pyxel.KEY_RETURN) or self.touch_active
+        wants_fire = pyxel.btn(pyxel.KEY_RETURN) or (
+            self.touch_active and not self._is_touch_in_mobile_control_area()
+        )
 
         if wants_fire and self.player.shoot_cooldown <= 0:
             self.bullets.append(
@@ -649,6 +756,8 @@ class ShootGame:
 
         if pyxel.btnp(pyxel.KEY_C):
             self._try_activate_homing_laser()
+
+        self._update_mobile_action_buttons()
 
     def _try_activate_bomb(self) -> None:
         if self.bomb_stock <= 0:
@@ -1393,6 +1502,7 @@ class ShootGame:
         self._draw_background()
         self._draw_background_fireworks()
         self._draw_frame()
+        self._draw_mobile_controls()
         self._draw_bombs()
         self._draw_enemies()
         self._draw_boss()
@@ -1425,6 +1535,87 @@ class ShootGame:
     def _draw_frame(self) -> None:
         pyxel.rectb(0, 0, self.WIDTH, self.HEIGHT, self.frame_color)
         pyxel.line(0, self.HUD_H, self.WIDTH - 1, self.HUD_H, self.divider_color)
+
+    def _draw_mobile_controls(self) -> None:
+        if self.phase != GamePhase.PLAYING:
+            return
+
+        (ax, ay), (bx, by), (cx, cy) = self._mobile_control_vertices()
+
+        tri_fill = 8
+        tri_border = 10
+        if self._is_touch_in_mobile_control_area() and (self.frame_count // 3) % 2 == 0:
+            tri_fill = 9
+            tri_border = 7
+
+        pyxel.tri(ax, ay, bx, by, cx, cy, tri_fill)
+        pyxel.line(ax, ay, bx, by, tri_border)
+        pyxel.line(bx, by, cx, cy, tri_border)
+        pyxel.line(cx, cy, ax, ay, tri_border)
+
+        self._draw_mobile_laser_button()
+        self._draw_mobile_bomb_button()
+
+    def _draw_mobile_laser_button(self) -> None:
+        ready = self.laser_cooldown <= 0 and len(self.homing_lasers) < self.laser_active_limit
+        pressed = self._is_mobile_laser_pressed()
+
+        if ready:
+            fill = 12
+            border = 7
+            text = 7
+        else:
+            fill = 5
+            border = 13
+            text = 6
+
+        if pressed and ready:
+            fill = 7
+            border = 12
+            text = 1
+
+        cx = self.MOBILE_LASER_CX
+        cy = self.MOBILE_LASER_CY
+        r = self.MOBILE_BTN_R
+
+        pyxel.circ(cx, cy, r, fill)
+        pyxel.circb(cx, cy, r, border)
+        pyxel.circb(cx, cy, r - 3, border)
+
+        pyxel.text(cx - 14, cy - 8, "LASER", text)
+        if self.laser_cooldown > 0:
+            pyxel.text(cx - 10, cy + 4, f"{self.laser_cooldown:02d}", text)
+        else:
+            pyxel.text(cx - 10, cy + 4, "RDY", text)
+
+    def _draw_mobile_bomb_button(self) -> None:
+        ready = self.bomb_stock > 0 and len(self.bombs) < self.bomb_active_limit
+        pressed = self._is_mobile_bomb_pressed()
+
+        if ready:
+            fill = 10
+            border = 7
+            text = 7
+        else:
+            fill = 2
+            border = 5
+            text = 6
+
+        if pressed and ready:
+            fill = 7
+            border = 10
+            text = 1
+
+        cx = self.MOBILE_BOMB_CX
+        cy = self.MOBILE_BOMB_CY
+        r = self.MOBILE_BTN_R
+
+        pyxel.circ(cx, cy, r, fill)
+        pyxel.circb(cx, cy, r, border)
+        pyxel.circb(cx, cy, r - 3, border)
+
+        pyxel.text(cx - 12, cy - 8, "BOMB", text)
+        pyxel.text(cx - 3, cy + 4, str(self.bomb_stock), text)
 
     def _draw_player(self) -> None:
         if self.phase == GamePhase.START:
