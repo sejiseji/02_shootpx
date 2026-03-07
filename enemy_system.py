@@ -1,0 +1,352 @@
+from __future__ import annotations
+
+import math
+import random
+from typing import Callable
+
+from game_models import Enemy
+
+
+AppendEnemyBulletFn = Callable[..., bool]
+
+
+def pick_enemy_type(score: int) -> str:
+    enemy_types = [
+        "basic",
+        "zigzag",
+        "shooter",
+        "tank",
+        "sprint",
+        "spreader",
+        "aimer",
+    ]
+
+    if score < 80:
+        weights = [42, 18, 14, 0, 26, 0, 0]
+    elif score < 180:
+        weights = [24, 14, 18, 10, 12, 12, 10]
+    else:
+        weights = [14, 10, 14, 16, 10, 18, 18]
+
+    return random.choices(enemy_types, weights=weights, k=1)[0]
+
+
+def pick_enemy_scale(enemy_type: str) -> float:
+    ranges = {
+        "basic": (1.4, 1.8),
+        "zigzag": (1.3, 1.7),
+        "shooter": (1.5, 1.9),
+        "tank": (1.8, 2.4),
+        "sprint": (1.2, 1.5),
+        "spreader": (1.4, 1.9),
+        "aimer": (1.5, 2.0),
+    }
+    low, high = ranges.get(enemy_type, (1.4, 1.8))
+    return random.uniform(low, high)
+
+
+def scale_enemy_hp(base_hp: int, display_scale: float) -> int:
+    factor = 0.70 + 0.35 * display_scale
+    return max(1, math.ceil(base_hp * factor))
+
+
+def scale_enemy_score(base_score: int, display_scale: float) -> int:
+    factor = 0.75 + 0.55 * display_scale
+    return max(base_score, int(round(base_score * factor)))
+
+
+def scale_enemy_vx(base_vx: float, display_scale: float) -> float:
+    if base_vx == 0:
+        return 0.0
+    factor = max(0.55, 1.15 - 0.16 * display_scale)
+    return base_vx * factor
+
+
+def scale_enemy_vy(base_vy: float, display_scale: float) -> float:
+    factor = max(0.55, 1.18 - 0.18 * display_scale)
+    return base_vy * factor
+
+
+def build_enemy_hitbox(
+    *,
+    enemy_half_w: float,
+    enemy_half_h: float,
+    display_scale: float,
+) -> tuple[float, float]:
+    hit_half_w = max(6.0, enemy_half_w * display_scale * 0.72)
+    hit_half_h = max(6.0, enemy_half_h * display_scale * 0.68)
+    return hit_half_w, hit_half_h
+
+
+def scale_enemy_bullet_radius(base_radius: int, display_scale: float) -> int:
+    factor = max(1.0, 0.85 + 0.30 * display_scale)
+    return max(2, int(round(base_radius * factor)))
+
+
+def scale_enemy_bullet_speed_y(base_vy: float, display_scale: float) -> float:
+    factor = max(0.72, 1.08 - 0.10 * display_scale)
+    return base_vy * factor
+
+
+def scale_enemy_bullet_speed_x(base_vx: float, display_scale: float) -> float:
+    factor = max(0.72, 1.05 - 0.08 * display_scale)
+    return base_vx * factor
+
+
+def build_enemy_bullet_display_scale(display_scale: float) -> float:
+    return max(1.0, 0.85 + 0.30 * display_scale)
+
+
+def create_enemy(
+    *,
+    spawn_x: float,
+    enemy_type: str,
+    enemy_half_h: float,
+    enemy_half_w: float,
+) -> Enemy:
+    move_phase = random.uniform(0.0, math.tau)
+    display_scale = pick_enemy_scale(enemy_type)
+
+    if enemy_type == "zigzag":
+        base_vx = random.uniform(1.2, 2.0)
+        base_vy = random.uniform(1.6, 2.6)
+        base_hp = 1
+        base_score = 15
+        shoot_cooldown = random.randrange(9999, 12000)
+        fire_interval = 9999
+        bullet_speed = 0.0
+
+    elif enemy_type == "shooter":
+        base_vx = random.choice([-0.6, 0.6])
+        base_vy = random.uniform(1.1, 1.8)
+        base_hp = 2
+        base_score = 20
+        shoot_cooldown = random.randrange(35, 70)
+        fire_interval = random.randrange(55, 95)
+        bullet_speed = scale_enemy_bullet_speed_y(
+            random.uniform(2.4, 3.0),
+            display_scale,
+        )
+
+    elif enemy_type == "tank":
+        base_vx = random.choice([-0.4, 0.4])
+        base_vy = random.uniform(0.9, 1.5)
+        base_hp = 3
+        base_score = 30
+        shoot_cooldown = random.randrange(55, 95)
+        fire_interval = random.randrange(70, 120)
+        bullet_speed = scale_enemy_bullet_speed_y(
+            random.uniform(2.0, 2.6),
+            display_scale,
+        )
+
+    elif enemy_type == "sprint":
+        base_vx = random.choice([-0.9, 0.9])
+        base_vy = random.uniform(2.4, 4.2)
+        base_hp = 1
+        base_score = 18
+        shoot_cooldown = random.randrange(9999, 12000)
+        fire_interval = 9999
+        bullet_speed = 0.0
+
+    elif enemy_type == "spreader":
+        base_vx = random.choice([-0.5, 0.5])
+        base_vy = random.uniform(1.0, 1.6)
+        base_hp = 2
+        base_score = 24
+        shoot_cooldown = random.randrange(45, 75)
+        fire_interval = random.randrange(70, 110)
+        bullet_speed = scale_enemy_bullet_speed_y(
+            random.uniform(2.2, 2.8),
+            display_scale,
+        )
+
+    elif enemy_type == "aimer":
+        base_vx = random.choice([-0.35, 0.35])
+        base_vy = random.uniform(0.9, 1.4)
+        base_hp = 2
+        base_score = 28
+        shoot_cooldown = random.randrange(55, 95)
+        fire_interval = random.randrange(90, 130)
+        bullet_speed = scale_enemy_bullet_speed_y(
+            random.uniform(2.6, 3.2),
+            display_scale,
+        )
+
+    else:
+        base_vx = 0.0
+        base_vy = random.uniform(1.8, 3.6)
+        base_hp = 1
+        base_score = 10
+        shoot_cooldown = random.randrange(9999, 12000)
+        fire_interval = 9999
+        bullet_speed = 0.0
+
+    scaled_vx = scale_enemy_vx(base_vx, display_scale)
+    scaled_vy = scale_enemy_vy(base_vy, display_scale)
+    scaled_hp = scale_enemy_hp(base_hp, display_scale)
+    scaled_score = scale_enemy_score(base_score, display_scale)
+    hit_half_w, hit_half_h = build_enemy_hitbox(
+        enemy_half_w=enemy_half_w,
+        enemy_half_h=enemy_half_h,
+        display_scale=display_scale,
+    )
+
+    return Enemy(
+        x=spawn_x,
+        y=float(-enemy_half_h * display_scale),
+        vx=scaled_vx,
+        vy=scaled_vy,
+        enemy_type=enemy_type,
+        hp=scaled_hp,
+        max_hp=scaled_hp,
+        shoot_cooldown=shoot_cooldown,
+        fire_interval=fire_interval,
+        bullet_speed=bullet_speed,
+        move_phase=move_phase,
+        score_value=scaled_score,
+        display_scale=display_scale,
+        hit_half_w=hit_half_w,
+        hit_half_h=hit_half_h,
+    )
+
+
+def spawn_enemy_shot(
+    *,
+    enemy: Enemy,
+    player_x: float,
+    player_y: float,
+    append_enemy_bullet: AppendEnemyBulletFn,
+) -> None:
+    base_x = enemy.x
+    base_y = enemy.y + enemy.hit_half_h + 4
+    bullet_scale = build_enemy_bullet_display_scale(enemy.display_scale)
+
+    if enemy.enemy_type == "shooter":
+        radius = scale_enemy_bullet_radius(3, enemy.display_scale)
+        append_enemy_bullet(
+            x=base_x,
+            y=base_y,
+            vx=0.0,
+            vy=enemy.bullet_speed,
+            radius=radius,
+            color=8,
+            damage=1,
+            display_scale=bullet_scale,
+        )
+        return
+
+    if enemy.enemy_type == "tank":
+        radius = scale_enemy_bullet_radius(4, enemy.display_scale)
+        for base_vx in (-0.8, 0.8):
+            append_enemy_bullet(
+                x=base_x,
+                y=base_y,
+                vx=scale_enemy_bullet_speed_x(base_vx, enemy.display_scale),
+                vy=enemy.bullet_speed,
+                radius=radius,
+                color=14,
+                damage=1,
+                display_scale=bullet_scale,
+            )
+        return
+
+    if enemy.enemy_type == "spreader":
+        radius = scale_enemy_bullet_radius(3, enemy.display_scale)
+        for base_vx in (-1.0, 0.0, 1.0):
+            append_enemy_bullet(
+                x=base_x,
+                y=base_y,
+                vx=scale_enemy_bullet_speed_x(base_vx, enemy.display_scale),
+                vy=enemy.bullet_speed,
+                radius=radius,
+                color=9,
+                damage=1,
+                display_scale=bullet_scale,
+            )
+        return
+
+    if enemy.enemy_type == "aimer":
+        radius = scale_enemy_bullet_radius(4, enemy.display_scale)
+        dx = player_x - base_x
+        dy = player_y - base_y
+        length = math.hypot(dx, dy)
+        if length <= 0.0001:
+            aim_vx = 0.0
+            aim_vy = enemy.bullet_speed
+        else:
+            aim_vx = dx / length * enemy.bullet_speed
+            aim_vy = dy / length * enemy.bullet_speed
+
+        append_enemy_bullet(
+            x=base_x,
+            y=base_y,
+            vx=aim_vx,
+            vy=aim_vy,
+            radius=radius,
+            color=10,
+            damage=1,
+            display_scale=bullet_scale,
+        )
+
+
+def update_enemies(
+    *,
+    enemies: list[Enemy],
+    frame_count: int,
+    side_margin: int,
+    width: int,
+    enemy_half_w: float,
+    player_x: float,
+    player_y: float,
+    enemy_bullet_max_count: int,
+    current_enemy_bullet_count: int,
+    append_enemy_bullet: AppendEnemyBulletFn,
+) -> None:
+    for enemy in enemies:
+        sprite_half_w = enemy_half_w * enemy.display_scale
+        side_min = side_margin + sprite_half_w
+        side_max = width - side_margin - sprite_half_w
+
+        if enemy.enemy_type == "zigzag":
+            enemy.x += math.sin((frame_count * 0.12) + enemy.move_phase) * enemy.vx
+        elif enemy.enemy_type == "spreader":
+            enemy.x += enemy.vx * 0.45 + math.sin((frame_count * 0.08) + enemy.move_phase) * enemy.vx
+        elif enemy.enemy_type == "aimer":
+            enemy.x += enemy.vx * 0.30 + math.cos((frame_count * 0.06) + enemy.move_phase) * enemy.vx
+        elif enemy.enemy_type == "sprint":
+            enemy.x += enemy.vx
+            if frame_count % 32 == 0:
+                enemy.vx *= -1.0
+        else:
+            enemy.x += enemy.vx
+
+        enemy.y += enemy.vy
+        enemy.anim_state = (frame_count // 10) % 2
+
+        if enemy.x < side_min:
+            enemy.x = side_min
+            if enemy.enemy_type != "zigzag":
+                enemy.vx = abs(enemy.vx)
+        elif enemy.x > side_max:
+            enemy.x = side_max
+            if enemy.enemy_type != "zigzag":
+                enemy.vx = -abs(enemy.vx)
+
+        if enemy.hit_flash_timer > 0:
+            enemy.hit_flash_timer -= 1
+            enemy.was_hit = True
+        else:
+            enemy.was_hit = False
+
+        if enemy.shoot_cooldown > 0:
+            enemy.shoot_cooldown -= 1
+        elif enemy.enemy_type in {"shooter", "tank", "spreader", "aimer"}:
+            if current_enemy_bullet_count < enemy_bullet_max_count:
+                spawn_enemy_shot(
+                    enemy=enemy,
+                    player_x=player_x,
+                    player_y=player_y,
+                    append_enemy_bullet=append_enemy_bullet,
+                )
+                enemy.shoot_cooldown = enemy.fire_interval
