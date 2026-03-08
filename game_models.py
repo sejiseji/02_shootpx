@@ -15,6 +15,12 @@ class Bullet:
     x: float
     y: float
     vy: float
+    vx: float = 0.0
+    damage: int = 1
+    radius: int = 3
+    color_core: int = 10
+    color_outer: int = 6
+    style: str = "normal"
     active: bool = True
 
 
@@ -27,7 +33,7 @@ class EnemyBullet:
     radius: int
     color: int
     damage: int
-    display_scale: float = 1.0
+    display_scale: float
     active: bool = True
     age: int = 0
     max_life: int = 180
@@ -46,10 +52,10 @@ class Enemy:
     was_hit: bool = False
     hit_flash_timer: int = 0
     shoot_cooldown: int = 0
-    fire_interval: int = 0
+    fire_interval: int = 9999
     bullet_speed: float = 0.0
     move_phase: float = 0.0
-    score_value: int = 0
+    score_value: int = 10
     display_scale: float = 1.0
     hit_half_w: float = 8.0
     hit_half_h: float = 8.0
@@ -66,8 +72,8 @@ class Boss:
     max_hp: int
     target_y: float
     entry_done: bool = False
-    shoot_cooldown: int = 0
-    fire_interval: int = 0
+    shoot_cooldown: int = 60
+    fire_interval: int = 42
     pattern_cycle: int = 0
     was_hit: bool = False
     hit_flash_timer: int = 0
@@ -83,8 +89,8 @@ class Player:
     y: float
     hp: int
     max_hp: int
-    speed_x: float
-    speed_y: float
+    speed_x: int
+    speed_y: int
     shoot_cooldown: int = 0
     is_hit: bool = False
     invincible_timer: int = 0
@@ -120,11 +126,22 @@ class HomingLaser:
     turn_rate: float
     life: int
     max_life: int
-    radius: float
-    band_width: float
+    radius: int
+    band_width: int
     damage: int
     trail: list[tuple[float, float]] = field(default_factory=list)
     hit_cooldowns: dict[int, int] = field(default_factory=dict)
     target_id: int | None = None
     reacquire_timer: int = 0
+    active: bool = True
+
+
+@dataclass
+class TeaItem:
+    x: float
+    y: float
+    vx: float
+    vy: float
+    radius: int = 8
+    bob_phase: float = 0.0
     active: bool = True

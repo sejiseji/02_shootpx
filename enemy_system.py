@@ -33,15 +33,15 @@ def pick_enemy_type(score: int) -> str:
 
 def pick_enemy_scale(enemy_type: str) -> float:
     ranges = {
-        "basic": (1.4, 1.8),
-        "zigzag": (1.3, 1.7),
-        "shooter": (1.5, 1.9),
-        "tank": (1.8, 2.4),
-        "sprint": (1.2, 1.5),
-        "spreader": (1.4, 1.9),
-        "aimer": (1.5, 2.0),
+        "basic": (1.45, 1.87),
+        "zigzag": (1.36, 1.70),
+        "shooter": (1.53, 1.91),
+        "tank": (1.79, 2.38),
+        "sprint": (1.28, 1.53),
+        "spreader": (1.45, 1.87),
+        "aimer": (1.53, 2.00),
     }
-    low, high = ranges.get(enemy_type, (1.4, 1.8))
+    low, high = ranges.get(enemy_type, (1.45, 1.87))
     return random.uniform(low, high)
 
 
@@ -73,8 +73,8 @@ def build_enemy_hitbox(
     enemy_half_h: float,
     display_scale: float,
 ) -> tuple[float, float]:
-    hit_half_w = max(6.0, enemy_half_w * display_scale * 0.72)
-    hit_half_h = max(6.0, enemy_half_h * display_scale * 0.68)
+    hit_half_w = max(6.5, enemy_half_w * display_scale * 0.76)
+    hit_half_h = max(6.5, enemy_half_h * display_scale * 0.72)
     return hit_half_w, hit_half_h
 
 

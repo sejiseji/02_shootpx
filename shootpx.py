@@ -13,7 +13,17 @@ from fireworks import (
     BackgroundFirework,
     radiating_sphere_projection_burst,
 )
-from game_models import BombField, Boss, Bullet, Enemy, EnemyBullet, GamePhase, HomingLaser, Player
+from game_models import (
+    BombField,
+    Boss,
+    Bullet,
+    Enemy,
+    EnemyBullet,
+    GamePhase,
+    HomingLaser,
+    Player,
+    TeaItem,
+)
 
 
 class ShootGame:
@@ -21,7 +31,7 @@ class ShootGame:
     HEIGHT = 640
     DISPLAY_SCALE = 2
 
-    HUD_H = 128
+    HUD_H = 112
     PLAY_TOP = HUD_H + 2
     SIDE_MARGIN = 24
 
@@ -36,7 +46,6 @@ class ShootGame:
     ENEMY_HALF_H = ENEMY_H // 2
 
     BULLET_R = 3
-    SHOT_HIT_R = 4
 
     PLAYER_START_Y = HEIGHT - 84
     PLAYER_MIN_Y = PLAY_TOP + PLAYER_HALF_H + 10
@@ -74,19 +83,30 @@ class ShootGame:
 
     BOMB_RESTOCK_FLASH_FRAMES = 24
 
-    # ============================================================
-    # Mobile virtual controls (left-hand triangular area)
-    # ============================================================
-    MOBILE_CTRL_LEFT = 0
-    MOBILE_CTRL_BOTTOM = HEIGHT - 1
-    MOBILE_CTRL_TOP = HEIGHT - 156
-    MOBILE_CTRL_RIGHT = 126
+    MOBILE_CTRL_RADIUS = 110
+    MOBILE_CTRL_CX = 0
+    MOBILE_CTRL_CY = HEIGHT - 1
 
-    MOBILE_LASER_CX = 38
-    MOBILE_LASER_CY = HEIGHT - 108
-    MOBILE_BOMB_CX = 58
-    MOBILE_BOMB_CY = HEIGHT - 58
-    MOBILE_BTN_R = 22
+    MOBILE_BTN_R = 18
+    MOBILE_LASER_CX = 30
+    MOBILE_LASER_CY = HEIGHT - 74
+    MOBILE_BOMB_CX = 56
+    MOBILE_BOMB_CY = HEIGHT - 38
+
+    TEA_DROP_CHANCE = 0.06
+    TEA_FALL_SPEED = 1.35
+    TEA_BOB_SPEED = 0.10
+    TEA_PICKUP_RADIUS = 13
+    TEA_FLASH_FRAMES = 22
+
+    SHOT_FAMILY_TEA = "tea"
+    SHOT_LEVEL_SINGLE = 0
+    SHOT_LEVEL_DOUBLE = 1
+    SHOT_LEVEL_TRIPLE = 2
+    SHOT_LEVEL_POWER_SINGLE = 3
+    SHOT_LEVEL_POWER_DOUBLE = 4
+    SHOT_LEVEL_POWER_TRIPLE = 5
+    SHOT_LEVEL_MAX = 5
 
     ENEMY_SPRITE_COLUMNS = {
         "basic": 0,
@@ -177,13 +197,17 @@ class ShootGame:
         self.enemies: list[Enemy] = []
         self.bombs: list[BombField] = []
         self.homing_lasers: list[HomingLaser] = []
+        self.tea_items: list[TeaItem] = []
         self.boss: Boss | None = None
 
         self.effects.clear()
 
         self.score = 0
         self.enemy_kill_count = 0
+
         self.touch_active = False
+        self.prev_touch_down = False
+        self.touch_drag_active = False
 
         self.spawn_timer = 0
         self.spawn_interval_sec = 0.62
@@ -212,9 +236,14 @@ class ShootGame:
         self.boss_hp_shake_timer = 0
         self.boss_hp_flash_timer = 0
 
-    # ============================================================
-    # Theme / palette
-    # ============================================================
+        self.boss_spawn_count = 0
+        self.next_boss_kill_threshold = self.BOSS_TRIGGER_KILLS
+        self.next_boss_score_threshold = self.BOSS_TRIGGER_SCORE
+
+        self.shot_family = self.SHOT_FAMILY_TEA
+        self.shot_level = self.SHOT_LEVEL_SINGLE
+        self.shot_pick_flash_timer = 0
+
     def _apply_theme(self, theme_name: str) -> None:
         theme = self.THEMES.get(theme_name, self.THEMES["fresh_night"])
         self.theme_name = theme_name
@@ -237,14 +266,9 @@ class ShootGame:
         self._set_theme_by_index(self.start_theme_index + delta)
 
     def _recolor_stars(self) -> None:
-        if not hasattr(self, "stars"):
-            return
         for star in self.stars:
             star[3] = self._random_star_color()
 
-    # ============================================================
-    # Shared helpers
-    # ============================================================
     def _bomb_capacity(self) -> int:
         return self.base_bomb_cap + self.bomb_bonus_cap
 
@@ -255,6 +279,8 @@ class ShootGame:
     def _update_ui_timers(self) -> None:
         if self.bomb_restock_flash_timer > 0:
             self.bomb_restock_flash_timer -= 1
+        if self.shot_pick_flash_timer > 0:
+            self.shot_pick_flash_timer -= 1
 
     def _random_star_color(self) -> int:
         return random.choice(self.star_colors)
@@ -272,57 +298,34 @@ class ShootGame:
             )
         return stars
 
-    # ============================================================
-    # Mobile control helpers
-    # ============================================================
     def _point_in_circle(self, px: float, py: float, cx: float, cy: float, r: float) -> bool:
         dx = px - cx
         dy = py - cy
         return dx * dx + dy * dy <= r * r
 
-    def _mobile_control_vertices(self) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:
-        return (
-            (self.MOBILE_CTRL_LEFT, self.MOBILE_CTRL_BOTTOM),
-            (self.MOBILE_CTRL_LEFT, self.MOBILE_CTRL_TOP),
-            (self.MOBILE_CTRL_RIGHT, self.MOBILE_CTRL_BOTTOM),
-        )
-
-    def _point_in_triangle(
-        self,
-        px: float,
-        py: float,
-        ax: float,
-        ay: float,
-        bx: float,
-        by: float,
-        cx: float,
-        cy: float,
-    ) -> bool:
-        def sign(x1: float, y1: float, x2: float, y2: float, x3: float, y3: float) -> float:
-            return (x1 - x3) * (y2 - y3) - (x2 - x3) * (y1 - y3)
-
-        d1 = sign(px, py, ax, ay, bx, by)
-        d2 = sign(px, py, bx, by, cx, cy)
-        d3 = sign(px, py, cx, cy, ax, ay)
-
-        has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
-        has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
-        return not (has_neg and has_pos)
+    def _point_in_rect(self, px: float, py: float, x: float, y: float, w: float, h: float) -> bool:
+        return x <= px <= x + w and y <= py <= y + h
 
     def _is_touch_in_mobile_control_area(self) -> bool:
         if not pyxel.btn(pyxel.MOUSE_BUTTON_LEFT):
             return False
 
-        (ax, ay), (bx, by), (cx, cy) = self._mobile_control_vertices()
-        return self._point_in_triangle(
-            float(pyxel.mouse_x),
-            float(pyxel.mouse_y),
-            float(ax),
-            float(ay),
-            float(bx),
-            float(by),
-            float(cx),
-            float(cy),
+        mx = float(pyxel.mouse_x)
+        my = float(pyxel.mouse_y)
+
+        if mx < 0 or my > self.HEIGHT - 1:
+            return False
+        if mx > self.MOBILE_CTRL_RADIUS:
+            return False
+        if my < self.HEIGHT - 1 - self.MOBILE_CTRL_RADIUS:
+            return False
+
+        return self._point_in_circle(
+            mx,
+            my,
+            float(self.MOBILE_CTRL_CX),
+            float(self.MOBILE_CTRL_CY),
+            float(self.MOBILE_CTRL_RADIUS),
         )
 
     def _is_mobile_laser_pressed(self) -> bool:
@@ -360,9 +363,204 @@ class ShootGame:
         self.prev_mobile_laser_pressed = laser_pressed
         self.prev_mobile_bomb_pressed = bomb_pressed
 
-    # ============================================================
-    # Enemy bullet safety
-    # ============================================================
+    def _update_touch_mode(self) -> None:
+        touch_down = pyxel.btn(pyxel.MOUSE_BUTTON_LEFT)
+        self.touch_active = touch_down
+
+        if touch_down and not self.prev_touch_down:
+            started_in_control = self._is_touch_in_mobile_control_area()
+            self.touch_drag_active = not started_in_control
+        elif not touch_down:
+            self.touch_drag_active = False
+
+        self.prev_touch_down = touch_down
+
+    def _shot_level_name(self) -> str:
+        mapping = {
+            self.SHOT_LEVEL_SINGLE: "SINGLE",
+            self.SHOT_LEVEL_DOUBLE: "DOUBLE",
+            self.SHOT_LEVEL_TRIPLE: "TRIPLE",
+            self.SHOT_LEVEL_POWER_SINGLE: "P-SINGLE",
+            self.SHOT_LEVEL_POWER_DOUBLE: "P-DOUBLE",
+            self.SHOT_LEVEL_POWER_TRIPLE: "P-TRIPLE",
+        }
+        return mapping.get(self.shot_level, "SINGLE")
+
+    def _advance_tea_shot(self) -> None:
+        if self.shot_family != self.SHOT_FAMILY_TEA:
+            self.shot_family = self.SHOT_FAMILY_TEA
+            self.shot_level = self.SHOT_LEVEL_POWER_SINGLE
+        else:
+            self.shot_level = min(self.shot_level + 1, self.SHOT_LEVEL_MAX)
+
+        self.shot_pick_flash_timer = self.TEA_FLASH_FRAMES
+
+    def _spawn_player_bullet(
+        self,
+        *,
+        x: float,
+        y: float,
+        vx: float,
+        vy: float,
+        damage: int,
+        radius: int,
+        color_core: int,
+        color_outer: int,
+        style: str,
+    ) -> None:
+        self.bullets.append(
+            Bullet(
+                x=x,
+                y=y,
+                vx=vx,
+                vy=vy,
+                damage=damage,
+                radius=radius,
+                color_core=color_core,
+                color_outer=color_outer,
+                style=style,
+            )
+        )
+
+    def _fire_current_shot(self) -> None:
+        origin_x = float(self.player.x)
+        origin_y = float(self.player.y - self.PLAYER_HALF_H - 6)
+
+        level = self.shot_level
+
+        if level == self.SHOT_LEVEL_SINGLE:
+            self._spawn_player_bullet(
+                x=origin_x,
+                y=origin_y,
+                vx=0.0,
+                vy=float(self.bullet_speed),
+                damage=1,
+                radius=3,
+                color_core=10,
+                color_outer=6,
+                style="normal",
+            )
+            return
+
+        if level == self.SHOT_LEVEL_DOUBLE:
+            for vx in (-1.15, 1.15):
+                self._spawn_player_bullet(
+                    x=origin_x + (vx * 1.2),
+                    y=origin_y,
+                    vx=vx,
+                    vy=float(self.bullet_speed),
+                    damage=1,
+                    radius=3,
+                    color_core=11,
+                    color_outer=3,
+                    style="normal",
+                )
+            return
+
+        if level == self.SHOT_LEVEL_TRIPLE:
+            triples = (
+                (-1.25, 0.0, 9, 4),
+                (0.0, 0.0, 10, 6),
+                (1.25, 0.0, 9, 4),
+            )
+            for vx, xoff, core, outer in triples:
+                self._spawn_player_bullet(
+                    x=origin_x + xoff,
+                    y=origin_y,
+                    vx=vx,
+                    vy=float(self.bullet_speed),
+                    damage=1,
+                    radius=3,
+                    color_core=core,
+                    color_outer=outer,
+                    style="normal",
+                )
+            return
+
+        if level == self.SHOT_LEVEL_POWER_SINGLE:
+            self._spawn_player_bullet(
+                x=origin_x,
+                y=origin_y,
+                vx=0.0,
+                vy=float(self.bullet_speed),
+                damage=2,
+                radius=5,
+                color_core=7,
+                color_outer=11,
+                style="power_single",
+            )
+            return
+
+        if level == self.SHOT_LEVEL_POWER_DOUBLE:
+            for vx, xoff in ((-1.0, -2.0), (1.0, 2.0)):
+                self._spawn_player_bullet(
+                    x=origin_x + xoff,
+                    y=origin_y,
+                    vx=vx,
+                    vy=float(self.bullet_speed),
+                    damage=2,
+                    radius=5,
+                    color_core=7,
+                    color_outer=11,
+                    style="power_double",
+                )
+            return
+
+        if level == self.SHOT_LEVEL_POWER_TRIPLE:
+            for vx, xoff in ((-1.05, -2.0), (0.0, 0.0), (1.05, 2.0)):
+                self._spawn_player_bullet(
+                    x=origin_x + xoff,
+                    y=origin_y,
+                    vx=vx,
+                    vy=float(self.bullet_speed),
+                    damage=2,
+                    radius=5,
+                    color_core=7,
+                    color_outer=11,
+                    style="power_triple",
+                )
+
+    def _maybe_spawn_tea_item(self, x: float, y: float) -> None:
+        if random.random() > self.TEA_DROP_CHANCE:
+            return
+
+        self.tea_items.append(
+            TeaItem(
+                x=x,
+                y=y,
+                vx=random.uniform(-0.25, 0.25),
+                vy=self.TEA_FALL_SPEED + random.uniform(-0.15, 0.18),
+                bob_phase=random.uniform(0.0, math.tau),
+            )
+        )
+
+    def _update_tea_items(self) -> None:
+        next_items: list[TeaItem] = []
+
+        for item in self.tea_items:
+            if not item.active:
+                continue
+
+            item.bob_phase += self.TEA_BOB_SPEED
+            item.x += item.vx + math.sin(item.bob_phase) * 0.45
+            item.y += item.vy
+
+            if item.y > self.HEIGHT + 20:
+                item.active = False
+                continue
+
+            dx = item.x - self.player.x
+            dy = item.y - self.player.y
+            limit = item.radius + self.TEA_PICKUP_RADIUS
+            if dx * dx + dy * dy <= limit * limit:
+                item.active = False
+                self._advance_tea_shot()
+                continue
+
+            next_items.append(item)
+
+        self.tea_items = next_items
+
     def _calc_enemy_bullet_max_life(self, vx: float, vy: float) -> int:
         speed = max(0.01, math.hypot(vx, vy))
         travel_w = self.WIDTH + (self.ENEMY_BULLET_MARGIN * 2)
@@ -374,9 +572,7 @@ class ShootGame:
     def _is_enemy_bullet_in_bounds(self, bullet: EnemyBullet) -> bool:
         return (
             -self.ENEMY_BULLET_MARGIN <= bullet.x <= self.WIDTH + self.ENEMY_BULLET_MARGIN
-            and self.PLAY_TOP - self.ENEMY_BULLET_MARGIN
-            <= bullet.y
-            <= self.HEIGHT + self.ENEMY_BULLET_MARGIN
+            and self.PLAY_TOP - self.ENEMY_BULLET_MARGIN <= bullet.y <= self.HEIGHT + self.ENEMY_BULLET_MARGIN
         )
 
     def _append_enemy_bullet(
@@ -417,11 +613,7 @@ class ShootGame:
         def keep_priority(bullet: EnemyBullet) -> tuple[int, float, int]:
             inside_visible = 0 <= bullet.x <= self.WIDTH and self.PLAY_TOP <= bullet.y <= self.HEIGHT
             distance_to_player = abs(bullet.x - self.player.x) + abs(bullet.y - self.player.y)
-            return (
-                1 if inside_visible else 0,
-                -distance_to_player,
-                -bullet.age,
-            )
+            return (1 if inside_visible else 0, -distance_to_player, -bullet.age)
 
         self.enemy_bullets.sort(key=keep_priority, reverse=True)
 
@@ -430,9 +622,6 @@ class ShootGame:
 
         self.enemy_bullets = self.enemy_bullets[: self.ENEMY_BULLET_MAX_COUNT]
 
-    # ============================================================
-    # Effect helpers
-    # ============================================================
     def _enemy_burst_scale_from_enemy(self, enemy: Enemy) -> float:
         return max(1.0, 0.75 + enemy.display_scale * 1.15)
 
@@ -448,29 +637,12 @@ class ShootGame:
     def _spawn_hit_spark(self, x: float, y: float, scale: float = 1.0) -> None:
         self.effects.spawn_hit_spark(x=x, y=y, scale=scale, layer=11)
 
-    def _spawn_laser_impact(
-        self,
-        x: float,
-        y: float,
-        vx: float,
-        vy: float,
-        scale: float = 1.0,
-    ) -> None:
-        self.effects.spawn_laser_impact(
-            x=x,
-            y=y,
-            vx=vx,
-            vy=vy,
-            scale=scale,
-            layer=12,
-        )
+    def _spawn_laser_impact(self, x: float, y: float, vx: float, vy: float, scale: float = 1.0) -> None:
+        self.effects.spawn_laser_impact(x=x, y=y, vx=vx, vy=vy, scale=scale, layer=12)
 
     def _spawn_bomb_launch_flash(self, x: float, y: float, scale: float = 1.0) -> None:
         self.effects.spawn_bomb_launch_flash(x=x, y=y, scale=scale, layer=9)
 
-    # ============================================================
-    # Boss control / state
-    # ============================================================
     def _is_boss_active(self) -> bool:
         return self.boss is not None and self.boss.active
 
@@ -478,9 +650,13 @@ class ShootGame:
         return boss_phase(self.boss)
 
     def _should_trigger_boss(self) -> bool:
-        if self.boss_event_started or self.boss_defeated or self._is_boss_active():
+        if self.boss_event_started or self._is_boss_active() or self.boss_intro_timer > 0:
             return False
-        return self.score >= self.BOSS_TRIGGER_SCORE or self.enemy_kill_count >= self.BOSS_TRIGGER_KILLS
+
+        return (
+            self.enemy_kill_count >= self.next_boss_kill_threshold
+            or self.score >= self.next_boss_score_threshold
+        )
 
     def _start_boss_intro(self) -> None:
         self.boss_event_started = True
@@ -491,22 +667,29 @@ class ShootGame:
         self.bullets.clear()
         self.bombs.clear()
         self.homing_lasers.clear()
+        self.tea_items.clear()
 
     def _spawn_boss(self) -> None:
         self.boss = spawn_boss(
             width=self.WIDTH,
             entry_target_y=float(self.BOSS_ENTRY_TARGET_Y),
             max_hp=self.BOSS_MAX_HP,
+            spawn_count=self.boss_spawn_count,
         )
         self.boss_hp_display = float(self.boss.max_hp)
         self.boss_hp_trail = float(self.boss.max_hp)
         self.boss_hp_shake_timer = 0
         self.boss_hp_flash_timer = 0
 
+    def _advance_boss_progression(self) -> None:
+        self.boss_spawn_count += 1
+        self.next_boss_kill_threshold += self.BOSS_TRIGGER_KILLS
+        self.next_boss_score_threshold += (self.boss_spawn_count + 1) * 1000
+        self.spawn_interval_sec = max(0.28, self.spawn_interval_sec - 0.04)
+
     def _update_boss_intro(self) -> None:
         if self.boss_intro_timer <= 0:
             return
-
         self.boss_intro_timer -= 1
         if self.boss_intro_timer <= 0 and self.boss is None:
             self._spawn_boss()
@@ -514,7 +697,6 @@ class ShootGame:
     def _update_boss_hp_bar_fx(self) -> None:
         if self.boss_hp_shake_timer > 0:
             self.boss_hp_shake_timer -= 1
-
         if self.boss_hp_flash_timer > 0:
             self.boss_hp_flash_timer -= 1
 
@@ -548,11 +730,15 @@ class ShootGame:
             boss=self.boss,
             frame_count=self.frame_count,
             width=self.WIDTH,
+            height=self.HEIGHT,
             side_margin=self.SIDE_MARGIN,
             boss_sprite_w=self.BOSS_SPRITE_W,
             player_x=float(self.player.x),
             player_y=float(self.player.y),
             append_enemy_bullet=self._append_enemy_bullet,
+            spawn_count=self.boss_spawn_count,
+            enemies=self.enemies,
+            create_enemy=self._create_enemy,
         )
 
     def _on_boss_defeated(self) -> None:
@@ -560,7 +746,6 @@ class ShootGame:
             return
 
         boss = self.boss
-
         self.score += self.BOSS_SCORE_VALUE
         self.enemy_bullets.clear()
         self._restock_bombs_full()
@@ -571,11 +756,59 @@ class ShootGame:
         self._spawn_enemy_burst(boss.x + 20, boss.y - 8, scale=burst_scale * 0.68)
 
         self.boss = None
+        self.boss_event_started = False
         self.boss_defeated = True
+        self._advance_boss_progression()
 
-    # ============================================================
-    # Main update flow
-    # ============================================================
+    def _laser_origin(self, boss: Boss) -> tuple[float, float]:
+        return boss.x, boss.y + 4.0
+
+    def _laser_dir(self, boss: Boss) -> tuple[float, float]:
+        angle = getattr(boss, "laser_angle", math.pi / 2)
+        return math.cos(angle), math.sin(angle)
+
+    def _point_segment_distance_sq(
+        self,
+        px: float,
+        py: float,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+    ) -> float:
+        dx = x1 - x0
+        dy = y1 - y0
+        if dx == 0.0 and dy == 0.0:
+            ox = px - x0
+            oy = py - y0
+            return ox * ox + oy * oy
+
+        t = ((px - x0) * dx + (py - y0) * dy) / (dx * dx + dy * dy)
+        t = max(0.0, min(1.0, t))
+        cx = x0 + dx * t
+        cy = y0 + dy * t
+        ox = px - cx
+        oy = py - cy
+        return ox * ox + oy * oy
+
+    def _boss_laser_hits_player(self) -> bool:
+        if self.boss is None:
+            return False
+        if getattr(self.boss, "laser_active_timer", 0) <= 0:
+            return False
+
+        ox, oy = self._laser_origin(self.boss)
+        dx, dy = self._laser_dir(self.boss)
+        length = max(self.WIDTH, self.HEIGHT) * 1.7
+        ex = ox + dx * length
+        ey = oy + dy * length
+
+        hit_r = 10.0
+        px = float(self.player.x)
+        py = float(self.player.y)
+        limit_sq = hit_r * hit_r
+        return self._point_segment_distance_sq(px, py, ox, oy, ex, ey) <= limit_sq
+
     def update(self) -> None:
         self.frame_count += 1
 
@@ -594,6 +827,7 @@ class ShootGame:
             return
 
         self._update_player_state()
+        self._update_touch_mode()
         self._update_player_input()
         self._update_shooting()
         self._update_special_input()
@@ -611,6 +845,7 @@ class ShootGame:
         self._update_enemy_bullets()
         self._update_bombs()
         self._update_homing_lasers()
+        self._update_tea_items()
 
         self._handle_projectile_cancellations()
 
@@ -620,16 +855,17 @@ class ShootGame:
 
         self._handle_bullet_enemy_collisions()
         self._handle_bullet_boss_collisions()
-
         self._handle_bomb_enemy_collisions()
         self._handle_bomb_boss_collisions()
-
         self._handle_homing_laser_enemy_collisions()
         self._handle_homing_laser_boss_collisions()
 
         self._handle_player_enemy_collisions()
         self._handle_player_boss_collisions()
         self._handle_player_enemy_bullet_collisions()
+
+        if self._boss_laser_hits_player():
+            self._apply_player_damage(1)
 
         if self.player.hp <= 0:
             self.phase = GamePhase.GAME_OVER
@@ -638,9 +874,6 @@ class ShootGame:
         if self._should_trigger_boss():
             self._start_boss_intro()
 
-    # ============================================================
-    # State input
-    # ============================================================
     def _update_start_input(self) -> None:
         move_left = pyxel.btnp(pyxel.KEY_LEFT) or pyxel.btnp(pyxel.KEY_UP)
         move_right = pyxel.btnp(pyxel.KEY_RIGHT) or pyxel.btnp(pyxel.KEY_DOWN)
@@ -650,11 +883,32 @@ class ShootGame:
         elif move_right:
             self._move_theme_selection(1)
 
-        wants_start = (
-            pyxel.btnp(pyxel.KEY_RETURN)
-            or pyxel.btnp(pyxel.KEY_SPACE)
-            or pyxel.btnp(pyxel.MOUSE_BUTTON_LEFT)
-        )
+        if pyxel.btnp(pyxel.MOUSE_BUTTON_LEFT):
+            mx = float(pyxel.mouse_x)
+            my = float(pyxel.mouse_y)
+
+            selector_x = 46
+            selector_y = (self.HEIGHT - 260) // 2 + 100
+            selector_w = 268
+            selector_h = 54
+
+            start_box_w = 280
+            start_box_h = 34
+            start_box_x = (self.WIDTH - start_box_w) // 2
+            start_box_y = (self.HEIGHT - 260) // 2 + 198
+
+            if self._point_in_rect(mx, my, selector_x, selector_y, selector_w * 0.5, selector_h):
+                self._move_theme_selection(-1)
+                return
+            if self._point_in_rect(mx, my, selector_x + selector_w * 0.5, selector_y, selector_w * 0.5, selector_h):
+                self._move_theme_selection(1)
+                return
+            if self._point_in_rect(mx, my, start_box_x, start_box_y, start_box_w, start_box_h):
+                self._reset_play_state()
+                self.phase = GamePhase.PLAYING
+                return
+
+        wants_start = pyxel.btnp(pyxel.KEY_RETURN) or pyxel.btnp(pyxel.KEY_SPACE)
         if wants_start:
             self._reset_play_state()
             self.phase = GamePhase.PLAYING
@@ -669,9 +923,6 @@ class ShootGame:
             self._reset_play_state()
             self.phase = GamePhase.PLAYING
 
-    # ============================================================
-    # Player update
-    # ============================================================
     def _update_player_state(self) -> None:
         if self.player.shoot_cooldown > 0:
             self.player.shoot_cooldown -= 1
@@ -700,7 +951,6 @@ class ShootGame:
             return
 
         self.firework_spawn_timer -= 1
-
         if self.firework_spawn_timer <= 0 and len(self.fireworks) < self.max_fireworks:
             launch_x = pyxel.rndi(48, self.WIDTH - 48)
             launch_y = pyxel.rndi(self.HEIGHT // 2, self.HEIGHT - 110)
@@ -727,8 +977,7 @@ class ShootGame:
         if pyxel.btn(pyxel.KEY_DOWN):
             self.player.y += self.player.speed_y
 
-        self.touch_active = pyxel.btn(pyxel.MOUSE_BUTTON_LEFT)
-        if self.touch_active and not self._is_touch_in_mobile_control_area():
+        if self.touch_drag_active:
             self.player.x = float(pyxel.mouse_x)
             self.player.y = float(pyxel.mouse_y)
 
@@ -736,24 +985,15 @@ class ShootGame:
         self.player.y = min(max(self.player.y, top_bound), bottom_bound)
 
     def _update_shooting(self) -> None:
-        wants_fire = pyxel.btn(pyxel.KEY_RETURN) or (
-            self.touch_active and not self._is_touch_in_mobile_control_area()
-        )
+        wants_fire = pyxel.btn(pyxel.KEY_RETURN) or self.touch_drag_active
 
         if wants_fire and self.player.shoot_cooldown <= 0:
-            self.bullets.append(
-                Bullet(
-                    x=float(self.player.x),
-                    y=float(self.player.y - self.PLAYER_HALF_H - 6),
-                    vy=float(self.bullet_speed),
-                )
-            )
+            self._fire_current_shot()
             self.player.shoot_cooldown = self.shoot_interval_frames
 
     def _update_special_input(self) -> None:
         if pyxel.btnp(pyxel.KEY_X):
             self._try_activate_bomb()
-
         if pyxel.btnp(pyxel.KEY_C):
             self._try_activate_homing_laser()
 
@@ -819,9 +1059,6 @@ class ShootGame:
         )
         self.laser_cooldown = self.laser_cooldown_frames
 
-    # ============================================================
-    # Enemy system bridge
-    # ============================================================
     def _create_enemy(self, spawn_x: float, enemy_type: str) -> Enemy:
         return create_enemy(
             spawn_x=spawn_x,
@@ -853,12 +1090,20 @@ class ShootGame:
         )
 
     def _update_bullets(self) -> None:
+        next_bullets: list[Bullet] = []
         for bullet in self.bullets:
+            if not bullet.active:
+                continue
+            bullet.x += bullet.vx
             bullet.y -= bullet.vy
+            if bullet.y < -16 or bullet.x < -16 or bullet.x > self.WIDTH + 16:
+                bullet.active = False
+                continue
+            next_bullets.append(bullet)
+        self.bullets = next_bullets
 
     def _update_enemy_bullets(self) -> None:
         next_enemy_bullets: list[EnemyBullet] = []
-
         for bullet in self.enemy_bullets:
             if not bullet.active:
                 continue
@@ -870,7 +1115,6 @@ class ShootGame:
             if bullet.age >= bullet.max_life:
                 bullet.active = False
                 continue
-
             if not self._is_enemy_bullet_in_bounds(bullet):
                 bullet.active = False
                 continue
@@ -880,9 +1124,6 @@ class ShootGame:
         self.enemy_bullets = next_enemy_bullets
         self._trim_enemy_bullets_to_cap()
 
-    # ============================================================
-    # Bomb / laser update
-    # ============================================================
     def _bomb_current_radius(self, bomb: BombField) -> float:
         if bomb.phase != "burst":
             return 0.0
@@ -979,11 +1220,9 @@ class ShootGame:
         for enemy in self.enemies:
             if enemy.y > laser.y + 24:
                 continue
-
             dx = enemy.x - laser.x
             dy = enemy.y - laser.y
             dist2 = dx * dx + dy * dy
-
             if dist2 < best_score:
                 best_score = dist2
                 best_target = enemy
@@ -1046,12 +1285,8 @@ class ShootGame:
 
         self.homing_lasers = [laser for laser in self.homing_lasers if laser.active]
 
-    # ============================================================
-    # Cleanup
-    # ============================================================
     def _remove_offscreen_bullets(self) -> None:
-        upper_limit = -self.BULLET_R
-        self.bullets = [b for b in self.bullets if b.y >= upper_limit]
+        self.bullets = [b for b in self.bullets if b.active]
 
     def _remove_offscreen_enemy_bullets(self) -> None:
         self.enemy_bullets = [
@@ -1063,51 +1298,15 @@ class ShootGame:
 
     def _remove_offscreen_enemies(self) -> None:
         self.enemies = [
-            e
-            for e in self.enemies
+            e for e in self.enemies
             if e.y <= self.HEIGHT + (self.ENEMY_HALF_H * e.display_scale) and e.active
         ]
 
-    # ============================================================
-    # Collision primitives
-    # ============================================================
-    def _circles_overlap(
-        self,
-        x1: float,
-        y1: float,
-        r1: float,
-        x2: float,
-        y2: float,
-        r2: float,
-    ) -> bool:
+    def _circles_overlap(self, x1: float, y1: float, r1: float, x2: float, y2: float, r2: float) -> bool:
         dx = x1 - x2
         dy = y1 - y2
         limit = r1 + r2
         return dx * dx + dy * dy <= limit * limit
-
-    def _point_segment_distance_sq(
-        self,
-        px: float,
-        py: float,
-        x0: float,
-        y0: float,
-        x1: float,
-        y1: float,
-    ) -> float:
-        dx = x1 - x0
-        dy = y1 - y0
-        if dx == 0.0 and dy == 0.0:
-            ox = px - x0
-            oy = py - y0
-            return ox * ox + oy * oy
-
-        t = ((px - x0) * dx + (py - y0) * dy) / (dx * dx + dy * dy)
-        t = max(0.0, min(1.0, t))
-        cx = x0 + dx * t
-        cy = y0 + dy * t
-        ox = px - cx
-        oy = py - cy
-        return ox * ox + oy * oy
 
     def _laser_hits_enemy_bullet(self, laser: HomingLaser, bullet: EnemyBullet) -> bool:
         if len(laser.trail) < 2:
@@ -1122,23 +1321,15 @@ class ShootGame:
             x1, y1 = trail[idx]
             if self._point_segment_distance_sq(bullet.x, bullet.y, x0, y0, x1, y1) <= limit_sq:
                 return True
-
         return False
 
-    # ============================================================
-    # Projectile cancellation
-    # ============================================================
     def _handle_projectile_cancellations(self) -> None:
         for bullet in self.bullets[:]:
             removed = False
             for enemy_bullet in self.enemy_bullets[:]:
                 if self._circles_overlap(
-                    bullet.x,
-                    bullet.y,
-                    self.BULLET_R,
-                    enemy_bullet.x,
-                    enemy_bullet.y,
-                    enemy_bullet.radius,
+                    bullet.x, bullet.y, bullet.radius,
+                    enemy_bullet.x, enemy_bullet.y, enemy_bullet.radius,
                 ):
                     if bullet in self.bullets:
                         self.bullets.remove(bullet)
@@ -1150,22 +1341,14 @@ class ShootGame:
                 continue
 
         for bomb in self.bombs:
-            if bomb.phase == "launch":
-                cancel_r = 8.0
-            else:
-                cancel_r = self._bomb_current_radius(bomb) * 0.92
-
+            cancel_r = 8.0 if bomb.phase == "launch" else self._bomb_current_radius(bomb) * 0.92
             if cancel_r <= 0:
                 continue
 
             for enemy_bullet in self.enemy_bullets[:]:
                 if self._circles_overlap(
-                    bomb.x,
-                    bomb.y,
-                    cancel_r,
-                    enemy_bullet.x,
-                    enemy_bullet.y,
-                    enemy_bullet.radius,
+                    bomb.x, bomb.y, cancel_r,
+                    enemy_bullet.x, enemy_bullet.y, enemy_bullet.radius,
                 ):
                     if enemy_bullet in self.enemy_bullets:
                         self.enemy_bullets.remove(enemy_bullet)
@@ -1176,11 +1359,8 @@ class ShootGame:
                     if enemy_bullet in self.enemy_bullets:
                         self.enemy_bullets.remove(enemy_bullet)
 
-    # ============================================================
-    # Hit tests
-    # ============================================================
     def _is_bullet_hitting_enemy(self, bullet: Bullet, enemy: Enemy) -> bool:
-        hit_r = self.SHOT_HIT_R
+        hit_r = bullet.radius + 1
         return (
             bullet.x - hit_r < enemy.x + enemy.hit_half_w
             and bullet.x + hit_r > enemy.x - enemy.hit_half_w
@@ -1189,7 +1369,7 @@ class ShootGame:
         )
 
     def _is_bullet_hitting_boss(self, bullet: Bullet, boss: Boss) -> bool:
-        hit_r = self.SHOT_HIT_R
+        hit_r = bullet.radius + 1
         return (
             bullet.x - hit_r < boss.x + boss.hit_half_w
             and bullet.x + hit_r > boss.x - boss.hit_half_w
@@ -1215,17 +1395,11 @@ class ShootGame:
 
     def _is_laser_hitting_enemy(self, laser: HomingLaser, enemy: Enemy) -> bool:
         sampled_points = laser.trail[-10::2]
-        for px, py in sampled_points:
-            if self._point_hits_enemy(px, py, laser.band_width, enemy):
-                return True
-        return False
+        return any(self._point_hits_enemy(px, py, laser.band_width, enemy) for px, py in sampled_points)
 
     def _is_laser_hitting_boss(self, laser: HomingLaser, boss: Boss) -> bool:
         sampled_points = laser.trail[-10::2]
-        for px, py in sampled_points:
-            if self._point_hits_boss(px, py, laser.band_width, boss):
-                return True
-        return False
+        return any(self._point_hits_boss(px, py, laser.band_width, boss) for px, py in sampled_points)
 
     def _is_enemy_hitting_player(self, enemy: Enemy) -> bool:
         return (
@@ -1251,9 +1425,6 @@ class ShootGame:
             and bullet.y + bullet.radius > self.player.y - self.PLAYER_HALF_H
         )
 
-    # ============================================================
-    # Damage / defeat processing
-    # ============================================================
     def _damage_enemy(
         self,
         enemy: Enemy,
@@ -1269,35 +1440,21 @@ class ShootGame:
         if enemy.hp <= 0:
             self.score += enemy.score_value
             self.enemy_kill_count += 1
-            self._spawn_enemy_burst(
-                enemy.x,
-                enemy.y,
-                scale=self._enemy_burst_scale_from_enemy(enemy),
-            )
+            self._spawn_enemy_burst(enemy.x, enemy.y, scale=self._enemy_burst_scale_from_enemy(enemy))
+            self._maybe_spawn_tea_item(enemy.x, enemy.y)
             if enemy in self.enemies:
                 self.enemies.remove(enemy)
             return
 
         if source == "shot":
-            self._spawn_hit_spark(
-                enemy.x,
-                enemy.y,
-                scale=max(0.7, enemy.display_scale * 0.55),
-            )
+            self._spawn_hit_spark(enemy.x, enemy.y, scale=max(0.7, enemy.display_scale * 0.55))
         elif source == "laser":
             self._spawn_laser_impact(
-                enemy.x,
-                enemy.y,
-                vx=hit_vx,
-                vy=hit_vy,
+                enemy.x, enemy.y, vx=hit_vx, vy=hit_vy,
                 scale=max(0.8, enemy.display_scale * 0.60),
             )
         elif source == "body":
-            self._spawn_hit_spark(
-                enemy.x,
-                enemy.y,
-                scale=max(0.8, enemy.display_scale * 0.60),
-            )
+            self._spawn_hit_spark(enemy.x, enemy.y, scale=max(0.8, enemy.display_scale * 0.60))
 
     def _damage_boss(
         self,
@@ -1310,6 +1467,11 @@ class ShootGame:
             return
 
         boss = self.boss
+
+        if getattr(boss, "entry_invulnerable", False):
+            return
+        if getattr(boss, "shield_timer", 0) > 0:
+            return
 
         if amount > 0:
             self._trigger_boss_hp_bar_hit_fx()
@@ -1325,27 +1487,16 @@ class ShootGame:
         if source == "shot":
             self._spawn_hit_spark(boss.x, boss.y, scale=1.4)
         elif source == "laser":
-            self._spawn_laser_impact(
-                boss.x,
-                boss.y,
-                vx=hit_vx,
-                vy=hit_vy,
-                scale=1.5,
-            )
+            self._spawn_laser_impact(boss.x, boss.y, vx=hit_vx, vy=hit_vy, scale=1.5)
         elif source == "body":
             self._spawn_hit_spark(boss.x, boss.y, scale=1.5)
 
-    # ============================================================
-    # Collision handling
-    # ============================================================
     def _handle_bullet_enemy_collisions(self) -> None:
         for bullet in self.bullets[:]:
             for enemy in self.enemies[:]:
                 if not self._is_bullet_hitting_enemy(bullet, enemy):
                     continue
-
-                self._damage_enemy(enemy, 1, source="shot")
-
+                self._damage_enemy(enemy, bullet.damage, source="shot")
                 if bullet in self.bullets:
                     self.bullets.remove(bullet)
                 break
@@ -1357,11 +1508,9 @@ class ShootGame:
         for bullet in self.bullets[:]:
             if not self._is_bullet_hitting_boss(bullet, self.boss):
                 continue
-
-            self._damage_boss(1, source="shot")
+            self._damage_boss(bullet.damage, source="shot")
             if bullet in self.bullets:
                 self.bullets.remove(bullet)
-
             if self.boss is None:
                 break
 
@@ -1373,13 +1522,11 @@ class ShootGame:
                 continue
 
             current_radius = self._bomb_current_radius(bomb)
-
             for enemy in self.enemies[:]:
                 dx = enemy.x - bomb.x
                 dy = enemy.y - bomb.y
                 enemy_extent = max(enemy.hit_half_w, enemy.hit_half_h)
                 limit = current_radius + enemy_extent
-
                 if dx * dx + dy * dy <= limit * limit:
                     self._damage_enemy(enemy, 2, source="bomb")
 
@@ -1408,20 +1555,12 @@ class ShootGame:
         for laser in self.homing_lasers:
             for enemy in self.enemies[:]:
                 enemy_key = id(enemy)
-
                 if laser.hit_cooldowns.get(enemy_key, 0) > 0:
                     continue
-
                 if not self._is_laser_hitting_enemy(laser, enemy):
                     continue
 
-                self._damage_enemy(
-                    enemy,
-                    laser.damage,
-                    source="laser",
-                    hit_vx=laser.vx,
-                    hit_vy=laser.vy,
-                )
+                self._damage_enemy(enemy, laser.damage, source="laser", hit_vx=laser.vx, hit_vy=laser.vy)
                 laser.hit_cooldowns[enemy_key] = 8
 
     def _handle_homing_laser_boss_collisions(self) -> None:
@@ -1429,20 +1568,13 @@ class ShootGame:
             return
 
         boss_key = id(self.boss)
-
         for laser in self.homing_lasers:
             if laser.hit_cooldowns.get(boss_key, 0) > 0:
                 continue
-
             if not self._is_laser_hitting_boss(laser, self.boss):
                 continue
 
-            self._damage_boss(
-                laser.damage,
-                source="laser",
-                hit_vx=laser.vx,
-                hit_vy=laser.vy,
-            )
+            self._damage_boss(laser.damage, source="laser", hit_vx=laser.vx, hit_vy=laser.vy)
             laser.hit_cooldowns[boss_key] = 8
 
             if self.boss is None:
@@ -1451,7 +1583,6 @@ class ShootGame:
     def _apply_player_damage(self, damage: int) -> None:
         if self.player.invincible_timer > 0:
             return
-
         self.player.hp -= damage
         self.player.invincible_timer = self.PLAYER_INVINCIBLE_FRAMES
         self.player.is_hit = True
@@ -1460,14 +1591,8 @@ class ShootGame:
         for enemy in self.enemies[:]:
             if not self._is_enemy_hitting_player(enemy):
                 continue
-
             self._apply_player_damage(1)
-            self._spawn_enemy_burst(
-                enemy.x,
-                enemy.y,
-                scale=self._enemy_burst_scale_from_enemy(enemy),
-            )
-
+            self._spawn_enemy_burst(enemy.x, enemy.y, scale=self._enemy_burst_scale_from_enemy(enemy))
             if enemy in self.enemies:
                 self.enemies.remove(enemy)
             break
@@ -1475,7 +1600,6 @@ class ShootGame:
     def _handle_player_boss_collisions(self) -> None:
         if self.boss is None:
             return
-
         if not self._is_boss_hitting_player(self.boss):
             return
 
@@ -1486,32 +1610,30 @@ class ShootGame:
         for bullet in self.enemy_bullets[:]:
             if not self._is_enemy_bullet_hitting_player(bullet):
                 continue
-
             self._apply_player_damage(bullet.damage)
-
             if bullet in self.enemy_bullets:
                 self.enemy_bullets.remove(bullet)
             break
 
-    # ============================================================
-    # Draw orchestration
-    # ============================================================
     def draw(self) -> None:
         pyxel.cls(self.play_bg_color)
 
         self._draw_background()
         self._draw_background_fireworks()
         self._draw_frame()
-        self._draw_mobile_controls()
+        self._draw_boss_dash_telegraph()
+        self._draw_boss_laser()
         self._draw_bombs()
         self._draw_enemies()
         self._draw_boss()
         self._draw_enemy_bullets()
+        self._draw_tea_items()
         self._draw_bullets()
         self._draw_homing_lasers()
         self._draw_effects()
         self._draw_player()
         self._draw_hud()
+        self._draw_mobile_controls()
 
         if self.boss_intro_timer > 0:
             self._draw_boss_warning()
@@ -1528,7 +1650,6 @@ class ShootGame:
     def _draw_background_fireworks(self) -> None:
         if not self.SHOW_BACKGROUND_FIREWORKS:
             return
-
         for firework in self.fireworks:
             firework.draw(self.frame_count)
 
@@ -1536,22 +1657,82 @@ class ShootGame:
         pyxel.rectb(0, 0, self.WIDTH, self.HEIGHT, self.frame_color)
         pyxel.line(0, self.HUD_H, self.WIDTH - 1, self.HUD_H, self.divider_color)
 
+    def _draw_boss_dash_telegraph(self) -> None:
+        if self.boss is None:
+            return
+        if getattr(self.boss, "dash_telegraph_timer", 0) <= 0:
+            return
+
+        bx = int(self.boss.x)
+        by = int(self.boss.y)
+        tx = int(getattr(self.boss, "dash_target_x", self.boss.x))
+        ty = int(getattr(self.boss, "dash_target_y", self.boss.y))
+
+        if (self.frame_count // 3) % 2 == 0:
+            pyxel.line(bx, by, tx, ty, 8)
+            pyxel.line(bx - 1, by, tx - 1, ty, 10)
+            pyxel.line(bx + 1, by, tx + 1, ty, 10)
+            pyxel.circb(tx, ty, 8, 7)
+            pyxel.circb(tx, ty, 12, 8)
+
+    def _draw_boss_laser(self) -> None:
+        if self.boss is None:
+            return
+
+        telegraph = getattr(self.boss, "laser_telegraph_timer", 0)
+        active = getattr(self.boss, "laser_active_timer", 0)
+        if telegraph <= 0 and active <= 0:
+            return
+        if getattr(self.boss, "entry_invulnerable", False):
+            return
+
+        ox, oy = self._laser_origin(self.boss)
+        dx, dy = self._laser_dir(self.boss)
+        length = max(self.WIDTH, self.HEIGHT) * 1.7
+        ex = ox + dx * length
+        ey = oy + dy * length
+
+        if telegraph > 0:
+            if (self.frame_count // 3) % 2 == 0:
+                pyxel.line(int(ox), int(oy), int(ex), int(ey), 8)
+                pyxel.line(int(ox - 1), int(oy), int(ex - 1), int(ey), 14)
+                pyxel.line(int(ox + 1), int(oy), int(ex + 1), int(ey), 14)
+            return
+
+        if active > 0:
+            for offset, color in (
+                (-4, 8),
+                (-3, 10),
+                (-2, 7),
+                (-1, 7),
+                (0, 15),
+                (1, 7),
+                (2, 7),
+                (3, 10),
+                (4, 8),
+            ):
+                perp_x = -dy * offset
+                perp_y = dx * offset
+                pyxel.line(
+                    int(ox + perp_x),
+                    int(oy + perp_y),
+                    int(ex + perp_x),
+                    int(ey + perp_y),
+                    color,
+                )
+
     def _draw_mobile_controls(self) -> None:
         if self.phase != GamePhase.PLAYING:
             return
 
-        (ax, ay), (bx, by), (cx, cy) = self._mobile_control_vertices()
-
-        tri_fill = 8
-        tri_border = 10
+        fill_color = 8
+        border_color = 10
         if self._is_touch_in_mobile_control_area() and (self.frame_count // 3) % 2 == 0:
-            tri_fill = 9
-            tri_border = 7
+            fill_color = 9
+            border_color = 7
 
-        pyxel.tri(ax, ay, bx, by, cx, cy, tri_fill)
-        pyxel.line(ax, ay, bx, by, tri_border)
-        pyxel.line(bx, by, cx, cy, tri_border)
-        pyxel.line(cx, cy, ax, ay, tri_border)
+        pyxel.circ(self.MOBILE_CTRL_CX, self.MOBILE_CTRL_CY, self.MOBILE_CTRL_RADIUS, fill_color)
+        pyxel.circb(self.MOBILE_CTRL_CX, self.MOBILE_CTRL_CY, self.MOBILE_CTRL_RADIUS, border_color)
 
         self._draw_mobile_laser_button()
         self._draw_mobile_bomb_button()
@@ -1583,10 +1764,7 @@ class ShootGame:
         pyxel.circb(cx, cy, r - 3, border)
 
         pyxel.text(cx - 14, cy - 8, "LASER", text)
-        if self.laser_cooldown > 0:
-            pyxel.text(cx - 10, cy + 4, f"{self.laser_cooldown:02d}", text)
-        else:
-            pyxel.text(cx - 10, cy + 4, "RDY", text)
+        pyxel.text(cx - 10, cy + 4, "RDY" if self.laser_cooldown <= 0 else f"{self.laser_cooldown:02d}", text)
 
     def _draw_mobile_bomb_button(self) -> None:
         ready = self.bomb_stock > 0 and len(self.bombs) < self.bomb_active_limit
@@ -1618,11 +1796,7 @@ class ShootGame:
         pyxel.text(cx - 3, cy + 4, str(self.bomb_stock), text)
 
     def _draw_player(self) -> None:
-        if self.phase == GamePhase.START:
-            blink = True
-        else:
-            blink = not self.player.is_hit or (self.frame_count // 3) % 2 == 0
-
+        blink = True if self.phase == GamePhase.START else (not self.player.is_hit or (self.frame_count // 3) % 2 == 0)
         if not blink:
             return
 
@@ -1640,8 +1814,25 @@ class ShootGame:
         for bullet in self.bullets:
             bx = int(bullet.x)
             by = int(bullet.y)
-            pyxel.line(bx, by + 6, bx, by - 3, 6)
-            pyxel.circ(bx, by, self.BULLET_R, 10)
+
+            if bullet.style == "normal":
+                pyxel.line(bx, by + 6, bx, by - 3, bullet.color_outer)
+                pyxel.circ(bx, by, bullet.radius, bullet.color_core)
+            elif bullet.style == "power_single":
+                pyxel.line(bx, by + 8, bx, by - 6, bullet.color_outer)
+                pyxel.circ(bx, by, bullet.radius, bullet.color_core)
+                pyxel.circb(bx, by, bullet.radius + 1, 15)
+            elif bullet.style == "power_double":
+                pyxel.line(bx, by + 8, bx, by - 5, bullet.color_outer)
+                pyxel.circ(bx, by, bullet.radius, bullet.color_core)
+                pyxel.pset(bx, by, 15)
+            elif bullet.style == "power_triple":
+                pyxel.line(bx, by + 8, bx, by - 6, bullet.color_outer)
+                pyxel.circ(bx, by, bullet.radius, bullet.color_core)
+                pyxel.circb(bx, by, bullet.radius + 1, 7)
+            else:
+                pyxel.line(bx, by + 6, bx, by - 3, bullet.color_outer)
+                pyxel.circ(bx, by, bullet.radius, bullet.color_core)
 
     def _draw_enemy_bullets(self) -> None:
         for bullet in self.enemy_bullets:
@@ -1649,9 +1840,25 @@ class ShootGame:
             by = int(bullet.y)
             pyxel.circ(bx, by, bullet.radius, bullet.color)
             pyxel.pset(bx, by, 7)
-
             if bullet.radius >= 5:
                 pyxel.circb(bx, by, bullet.radius, 7)
+
+    def _draw_tea_items(self) -> None:
+        for item in self.tea_items:
+            ix = int(item.x)
+            iy = int(item.y)
+
+            cup_color = 11 if (self.frame_count // 6) % 2 == 0 else 10
+            leaf_color = 3
+
+            pyxel.circ(ix, iy, 7, cup_color)
+            pyxel.circb(ix, iy, 7, 7)
+            pyxel.rect(ix - 3, iy - 2, 6, 5, 3)
+            pyxel.line(ix + 6, iy - 1, ix + 9, iy + 1, 7)
+            pyxel.line(ix + 9, iy + 1, ix + 8, iy + 4, 7)
+            pyxel.pset(ix - 1, iy - 1, leaf_color)
+            pyxel.pset(ix, iy - 2, leaf_color)
+            pyxel.pset(ix + 1, iy - 1, leaf_color)
 
     def _draw_bombs(self) -> None:
         for bomb in self.bombs:
@@ -1696,29 +1903,15 @@ class ShootGame:
 
                 if 0 <= x < self.WIDTH and 0 <= y < self.HEIGHT:
                     pyxel.pset(x, y, outer_color)
-
                     if idx % 10 == 0 and x + 1 < self.WIDTH:
                         pyxel.pset(x + 1, y, mid_color)
 
             for idx in range(0, len(points) - 12, 12):
                 p1 = points[idx]
                 p2 = points[idx + 6]
-                pyxel.line(
-                    int(p1.real),
-                    int(p1.imag),
-                    int(p2.real),
-                    int(p2.imag),
-                    mid_color,
-                )
+                pyxel.line(int(p1.real), int(p1.imag), int(p2.real), int(p2.imag), mid_color)
 
-    def _draw_thick_segment(
-        self,
-        x0: float,
-        y0: float,
-        x1: float,
-        y1: float,
-        half_width: int,
-    ) -> None:
+    def _draw_thick_segment(self, x0: float, y0: float, x1: float, y1: float, half_width: int) -> None:
         dx = x1 - x0
         dy = y1 - y0
         length = math.hypot(dx, dy)
@@ -1740,13 +1933,7 @@ class ShootGame:
             else:
                 color = 12
 
-            pyxel.line(
-                int(x0 + ox),
-                int(y0 + oy),
-                int(x1 + ox),
-                int(y1 + oy),
-                color,
-            )
+            pyxel.line(int(x0 + ox), int(y0 + oy), int(x1 + ox), int(y1 + oy), color)
 
     def _draw_homing_lasers(self) -> None:
         for laser in self.homing_lasers:
@@ -1759,7 +1946,6 @@ class ShootGame:
             for idx in range(1, trail_len):
                 x0, y0 = trail[idx - 1]
                 x1, y1 = trail[idx]
-
                 ratio = idx / trail_len
                 if ratio < 0.35:
                     width = max(2, laser.band_width - 3)
@@ -1767,7 +1953,6 @@ class ShootGame:
                     width = max(3, laser.band_width - 1)
                 else:
                     width = laser.band_width
-
                 self._draw_thick_segment(x0, y0, x1, y1, width)
 
     def _draw_effects(self) -> None:
@@ -1785,23 +1970,18 @@ class ShootGame:
             return
 
         u, v = self._get_enemy_sprite_uv(enemy)
-
         draw_w = self.ENEMY_SPRITE_SIZE * enemy.display_scale
         draw_h = self.ENEMY_SPRITE_SIZE * enemy.display_scale
         x = int(enemy.x - draw_w / 2)
         y = int(enemy.y - draw_h / 2)
 
         pyxel.blt(
-            x,
-            y,
+            x, y,
             self.ENEMY_SPRITE_BANK,
-            u,
-            v,
-            self.ENEMY_SPRITE_SIZE,
-            self.ENEMY_SPRITE_SIZE,
+            u, v,
+            self.ENEMY_SPRITE_SIZE, self.ENEMY_SPRITE_SIZE,
             self.ENEMY_SPRITE_COLKEY,
-            0.0,
-            enemy.display_scale,
+            0.0, enemy.display_scale,
         )
 
     def _draw_enemy_hp_bar(self, enemy: Enemy) -> None:
@@ -1832,9 +2012,6 @@ class ShootGame:
             return
 
         boss = self.boss
-        if boss.was_hit and (self.frame_count // 2) % 2 == 0:
-            self._draw_boss_hp_bar()
-            return
 
         frame = (self.frame_count // 6) % self.BOSS_SPRITE_FRAMES
         u = self.BOSS_SPRITE_U
@@ -1845,18 +2022,35 @@ class ShootGame:
         x = int(boss.x - draw_w / 2)
         y = int(boss.y - draw_h / 2)
 
-        pyxel.blt(
-            x,
-            y,
-            self.BOSS_SPRITE_BANK,
-            u,
-            v,
-            self.BOSS_SPRITE_W,
-            self.BOSS_SPRITE_H,
-            self.BOSS_SPRITE_COLKEY,
-            0.0,
-            boss.display_scale,
-        )
+        if not (boss.was_hit and (self.frame_count // 2) % 2 == 0):
+            pyxel.blt(
+                x, y,
+                self.BOSS_SPRITE_BANK,
+                u, v,
+                self.BOSS_SPRITE_W, self.BOSS_SPRITE_H,
+                self.BOSS_SPRITE_COLKEY,
+                0.0, boss.display_scale,
+            )
+
+        if getattr(boss, "entry_invulnerable", False):
+            aura_r = int(max(draw_w, draw_h) * 0.55)
+            aura_color = 12 if (self.frame_count // 4) % 2 == 0 else 7
+            pyxel.circb(int(boss.x), int(boss.y), aura_r, aura_color)
+            pyxel.circb(int(boss.x), int(boss.y), max(8, aura_r - 4), 6)
+
+        if getattr(boss, "shield_timer", 0) > 0:
+            base_r = int(max(draw_w, draw_h) * 0.58)
+            c1 = 12 if (self.frame_count // 3) % 2 == 0 else 7
+            c2 = 6 if (self.frame_count // 5) % 2 == 0 else 13
+            pyxel.circb(int(boss.x), int(boss.y), base_r, c1)
+            pyxel.circb(int(boss.x), int(boss.y), base_r + 4, c2)
+            pyxel.circb(int(boss.x), int(boss.y), max(10, base_r - 5), 7)
+
+        if getattr(boss, "summon_flash_timer", 0) > 0:
+            flash_r = int(max(draw_w, draw_h) * 0.70)
+            pyxel.circb(int(boss.x), int(boss.y), flash_r, 10)
+            if (self.frame_count // 2) % 2 == 0:
+                pyxel.circb(int(boss.x), int(boss.y), flash_r + 3, 7)
 
         self._draw_boss_hp_bar()
 
@@ -1883,6 +2077,11 @@ class ShootGame:
             trail_color = 9
             inner_border = 10
 
+        if self.boss is not None and getattr(self.boss, "shield_timer", 0) > 0:
+            main_color = 12
+            trail_color = 6
+            inner_border = 7
+
         flash = self.boss_hp_flash_timer > 0
         if flash:
             main_color = 7
@@ -1890,10 +2089,10 @@ class ShootGame:
 
         shake_x = self._boss_hp_bar_shake_offset()
 
-        bar_x = 52 + shake_x
+        bar_x = 44 + shake_x
         bar_y = self.HUD_H + 8
-        bar_w = self.WIDTH - 72
-        bar_h = 16
+        bar_w = self.WIDTH - 62
+        bar_h = 18
 
         current_hp = self.boss_hp_display
         max_hp = float(self.boss.max_hp) if self.boss is not None else float(self.BOSS_MAX_HP)
@@ -1904,7 +2103,7 @@ class ShootGame:
         fill_w = int((bar_w - 4) * fill_ratio)
         trail_w = int((bar_w - 4) * trail_ratio)
 
-        pyxel.text(10 + shake_x, bar_y + 4, "BOSS", 8 if not flash else 7)
+        pyxel.text(8 + shake_x, bar_y + 5, "BOSS", 8 if not flash else 7)
 
         pyxel.rect(bar_x, bar_y, bar_w, bar_h, 1)
         pyxel.rectb(bar_x - 2, bar_y - 2, bar_w + 4, bar_h + 4, 0)
@@ -1913,26 +2112,17 @@ class ShootGame:
 
         if trail_w > 0:
             pyxel.rect(bar_x + 2, bar_y + 2, trail_w, bar_h - 4, trail_color)
-
         if fill_w > 0:
             pyxel.rect(bar_x + 2, bar_y + 2, fill_w, bar_h - 4, main_color)
-            pyxel.line(
-                bar_x + 2,
-                bar_y + 3,
-                bar_x + 1 + fill_w,
-                bar_y + 3,
-                15 if not flash else 7,
-            )
+            pyxel.line(bar_x + 2, bar_y + 3, bar_x + 1 + fill_w, bar_y + 3, 15 if not flash else 7)
 
         hp_text = f"{int(max(0, round(current_hp))):03d}/{int(max_hp):03d}"
-        pyxel.text(bar_x + bar_w - 48, bar_y + 4, hp_text, 7 if not flash else 15)
-
+        pyxel.text(bar_x + bar_w - 48, bar_y + 6, hp_text, 7 if not flash else 15)
         if phase_text:
-            pyxel.text(bar_x + bar_w - 78, bar_y - 8, phase_text, 10 if not flash else 7)
+            pyxel.text(bar_x + bar_w - 82, bar_y - 8, phase_text, 10 if not flash else 7)
 
     def _draw_boss_warning(self) -> None:
-        blink = (self.frame_count // 8) % 2 == 0
-        if not blink:
+        if (self.frame_count // 8) % 2 != 0:
             return
 
         warning = "WARNING"
@@ -1951,54 +2141,38 @@ class ShootGame:
     def _draw_hud(self) -> None:
         pyxel.rect(0, 0, self.WIDTH, self.HUD_H, self.hud_bg_color)
 
-        pyxel.text(10, 8, "SCORE", 7)
-        draw_big_text(10, 18, f"{self.score:05d}", 2, 7)
+        pyxel.text(8, 6, "SCORE", 15)
+        draw_big_text(8, 18, f"{self.score:07d}", 2, 7, shadow_color=1)
 
-        pyxel.text(112, 8, "HP", 10)
-        draw_big_text(112, 18, f"{self.player.hp}", 2, 10)
+        pyxel.text(170, 6, "HP", 15)
+        draw_big_text(170, 14, f"{self.player.hp}", 3, 10, shadow_color=1)
 
-        pyxel.text(156, 8, "EN", 12)
-        draw_big_text(156, 18, f"{len(self.enemies):02d}", 2, 12)
+        pyxel.text(246, 6, "KILL", 15)
+        draw_big_text(246, 14, f"{self.enemy_kill_count:03d}", 3, 12, shadow_color=1)
 
-        pyxel.text(218, 8, "SHOT", 7)
+        draw_big_text(8, 52, "MOVE", 1, 13, shadow_color=1)
+        draw_big_text(52, 52, "ARROWS/DRAG", 1, 7, shadow_color=1)
 
-        cooldown_ratio = (
-            0.0
-            if self.player.shoot_cooldown <= 0
-            else self.player.shoot_cooldown / self.shoot_interval_frames
-        )
-        gauge_x = 218
-        gauge_y = 24
-        gauge_w = 126
-        gauge_h = 14
-        inner_w = gauge_w - 2
-        fill_w = int(inner_w * (1.0 - cooldown_ratio))
-
-        pyxel.rectb(gauge_x, gauge_y, gauge_w, gauge_h, 13)
-        pyxel.rect(gauge_x + 1, gauge_y + 1, max(0, fill_w), gauge_h - 2, 11)
-
-        pyxel.text(10, 60, "KEY", 13)
-        pyxel.text(42, 60, "ARROWS MOVE", 7)
-        pyxel.text(170, 60, "ENTER SHOOT", 7)
+        draw_big_text(182, 52, "SHOT", 1, 13, shadow_color=1)
+        draw_big_text(222, 52, "ENTER/TOUCH", 1, 7, shadow_color=1)
 
         bomb_label_color = 10 if self.bomb_restock_flash_timer <= 0 else 7
         bomb_value_color = 7 if self.bomb_restock_flash_timer <= 0 else 10
-        bomb_hint_color = 7 if self.bomb_restock_flash_timer <= 0 else 11
+        laser_text_color = 7
 
-        pyxel.text(10, 76, "BOMB", bomb_label_color)
-        pyxel.text(42, 76, f"X {self.bomb_stock}/{self._bomb_capacity()}", bomb_value_color)
-        pyxel.text(110, 76, "FORWARD LAUNCH + FIELD", bomb_hint_color)
+        draw_big_text(8, 74, "BOMB", 1, bomb_label_color, shadow_color=1)
+        draw_big_text(52, 74, f"X {self.bomb_stock}/{self._bomb_capacity()}", 1, bomb_value_color, shadow_color=1)
 
-        if self.bomb_restock_flash_timer > 0 and (self.frame_count // 3) % 2 == 0:
-            pyxel.text(250, 60, "RESTOCK", 10)
-
-        pyxel.text(10, 92, "LASER", 13)
-        laser_status = "READY" if self.laser_cooldown <= 0 else f"WAIT {self.laser_cooldown:02d}"
-        pyxel.text(52, 92, f"C {laser_status}", 7)
-        pyxel.text(132, 92, f"ACTIVE {len(self.homing_lasers)}/{self.laser_active_limit}", 7)
-
-        pyxel.text(10, 108, "BG FX", 13)
-        pyxel.text(52, 108, "OFF", 7)
+        laser_status = "READY" if self.laser_cooldown <= 0 else f"WAIT{self.laser_cooldown:02d}"
+        draw_big_text(8, 92, "LASER", 1, 13, shadow_color=1)
+        draw_big_text(
+            60,
+            92,
+            f"C {laser_status} {len(self.homing_lasers)}/{self.laser_active_limit}",
+            1,
+            laser_text_color,
+            shadow_color=1,
+        )
 
     def _draw_selector_arrow(self, x: int, y: int, direction: int, color: int) -> None:
         if direction < 0:
@@ -2018,7 +2192,7 @@ class ShootGame:
 
         title = "VERTICAL"
         subtitle = "SHOOTER"
-        start_text = "ENTER / TAP TO START"
+        start_text = "TAP / ENTER TO START"
 
         title_scale = 4
         subtitle_scale = 4
@@ -2030,19 +2204,23 @@ class ShootGame:
 
         draw_big_text(title_x, box_y + 14, title, title_scale, 11, shadow_color=1)
         draw_big_text(subtitle_x, box_y + 48, subtitle, subtitle_scale, 10, shadow_color=1)
-        draw_big_text(start_x, box_y + 204, start_text, start_scale, 7, shadow_color=1)
 
         selector_x = box_x + 26
         selector_y = box_y + 100
         selector_w = box_w - 52
         selector_h = 54
 
+        start_box_w = 280
+        start_box_h = 34
+        start_box_x = (self.WIDTH - start_box_w) // 2
+        start_box_y = box_y + 198
+
         pyxel.rect(selector_x, selector_y, selector_w, selector_h, 1)
         pyxel.rectb(selector_x, selector_y, selector_w, selector_h, 6)
         pyxel.rectb(selector_x + 2, selector_y + 2, selector_w - 4, selector_h - 4, 11)
 
         pyxel.text(selector_x + 10, selector_y + 8, "THEME SELECT", 12)
-        pyxel.text(selector_x + 10, selector_y + 42, "LEFT / RIGHT TO CHANGE", 7)
+        pyxel.text(selector_x + 10, selector_y + 42, "TAP LEFT / RIGHT TO CHANGE", 7)
 
         arrow_y = selector_y + 20
         self._draw_selector_arrow(selector_x + 12, arrow_y, -1, 10)
@@ -2053,9 +2231,13 @@ class ShootGame:
         theme_x = (self.WIDTH - big_text_width(theme_text, theme_scale)) // 2
         draw_big_text(theme_x, selector_y + 18, theme_text, theme_scale, 7)
 
-        pyxel.text(box_x + 18, box_y + 220, "SPECIAL  X FORWARD BOMB BURST", 10)
-        pyxel.text(box_x + 18, box_y + 232, "SPECIAL  C HOMING LASER BAND", 12)
-        pyxel.text(box_x + 18, box_y + 244, "BOSS AT SCORE 1000 OR 40 KILLS", 11)
+        pyxel.rect(start_box_x, start_box_y, start_box_w, start_box_h, 1)
+        pyxel.rectb(start_box_x, start_box_y, start_box_w, start_box_h, 10)
+        pyxel.rectb(start_box_x + 2, start_box_y + 2, start_box_w - 4, start_box_h - 4, 11)
+        draw_big_text(start_x, start_box_y + 8, start_text, start_scale, 7, shadow_color=1)
+
+        pyxel.text(box_x + 18, box_y + 236, "GREEN TEA BOOSTS SHOT POWER", 11)
+        pyxel.text(box_x + 18, box_y + 248, "BOMB / LASER AVAILABLE ON MOBILE", 10)
 
     def _draw_game_over(self) -> None:
         box_w = 248
