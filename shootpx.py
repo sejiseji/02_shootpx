@@ -20,9 +20,11 @@ from game_models import (
     Enemy,
     EnemyBullet,
     GamePhase,
+    HealItem,
     HomingLaser,
     Player,
-    TeaItem,
+    RewardChoice,
+    WeaponItem,
 )
 
 
@@ -73,6 +75,8 @@ class ShootGame:
     BOSS_SPRITE_H = 32
     BOSS_SPRITE_FRAMES = 8
     BOSS_SPRITE_COLKEY = 15
+    BOSS_AURA_CENTER_X_OFFSET = -12
+    BOSS_AURA_CENTER_Y_OFFSET = -6
 
     BOSS_TRIGGER_SCORE = 1000
     BOSS_TRIGGER_KILLS = 40
@@ -87,6 +91,13 @@ class ShootGame:
     MOBILE_CTRL_CX = 0
     MOBILE_CTRL_CY = HEIGHT - 1
 
+    MOBILE_RING_INNER_RADIUS = 34
+    MOBILE_RING_OUTER_RADIUS = 104
+    MOBILE_LASER_ANGLE_START = 52
+    MOBILE_LASER_ANGLE_END = 88
+    MOBILE_BOMB_ANGLE_START = 10
+    MOBILE_BOMB_ANGLE_END = 46
+
     MOBILE_BTN_R = 18
     MOBILE_LASER_CX = 30
     MOBILE_LASER_CY = HEIGHT - 74
@@ -98,8 +109,39 @@ class ShootGame:
     TEA_BOB_SPEED = 0.10
     TEA_PICKUP_RADIUS = 13
     TEA_FLASH_FRAMES = 22
+    TEA_DROP_BONUS_STEP = 0.03
+    WEAPON_ITEM_SWITCH_LOCK_FRAMES = 120
+    HEAL_DROP_CANCEL_CHANCE = 0.0025
+    WEAPON_OVERDRIVE_CAP = 2
 
-    SHOT_FAMILY_TEA = "tea"
+    REWARD_OPTION_COUNT = 3
+    REWARD_BOX_W = 292
+    REWARD_BOX_H = 88
+    REWARD_BOX_GAP = 14
+    REWARD_BOX_X = (WIDTH - REWARD_BOX_W) // 2
+    REWARD_BOX_START_Y = HUD_H + 106
+    REWARD_NOTICE_FRAMES = 72
+    REWARD_CUTIN_W = 236
+    REWARD_CUTIN_H = 68
+    REWARD_CUTIN_Y = HUD_H + 12
+    REWARD_CUTIN_SLANT = 28
+    REWARD_CUTIN_IN_FRAMES = 10
+    REWARD_CUTIN_OUT_FRAMES = 12
+
+    PLAYER_SPEED_CAP = 8
+    LASER_COOLDOWN_REWARD_STEP = 3
+    LASER_COOLDOWN_MIN = 8
+
+    WEAPON_FAMILY_FAN = "fan"
+    WEAPON_FAMILY_LANCE = "lance"
+    WEAPON_FAMILY_RAIN = "rain"
+    WEAPON_FAMILY_BEAM = "beam"
+    WEAPON_FAMILY_ORDER = (
+        WEAPON_FAMILY_FAN,
+        WEAPON_FAMILY_LANCE,
+        WEAPON_FAMILY_RAIN,
+        WEAPON_FAMILY_BEAM,
+    )
     SHOT_LEVEL_SINGLE = 0
     SHOT_LEVEL_DOUBLE = 1
     SHOT_LEVEL_TRIPLE = 2
@@ -107,6 +149,33 @@ class ShootGame:
     SHOT_LEVEL_POWER_DOUBLE = 4
     SHOT_LEVEL_POWER_TRIPLE = 5
     SHOT_LEVEL_MAX = 5
+
+    WEAPON_FAMILY_DATA = {
+        WEAPON_FAMILY_FAN: {
+            "name": "FAN",
+            "accent": 11,
+            "core": 10,
+            "outer": 6,
+        },
+        WEAPON_FAMILY_LANCE: {
+            "name": "LANCE",
+            "accent": 8,
+            "core": 8,
+            "outer": 7,
+        },
+        WEAPON_FAMILY_RAIN: {
+            "name": "RAIN",
+            "accent": 12,
+            "core": 12,
+            "outer": 5,
+        },
+        WEAPON_FAMILY_BEAM: {
+            "name": "BEAM",
+            "accent": 14,
+            "core": 14,
+            "outer": 7,
+        },
+    }
 
     ENEMY_SPRITE_COLUMNS = {
         "basic": 0,
@@ -166,6 +235,8 @@ class ShootGame:
 
         self.start_theme_keys = list(self.THEMES.keys())
         self.start_theme_index = self.start_theme_keys.index("fresh_night")
+        self.start_weapon_index = 0
+        self.start_menu_focus = 0
         self.theme_name = self.start_theme_keys[self.start_theme_index]
         self._apply_theme(self.theme_name)
 
@@ -197,7 +268,8 @@ class ShootGame:
         self.enemies: list[Enemy] = []
         self.bombs: list[BombField] = []
         self.homing_lasers: list[HomingLaser] = []
-        self.tea_items: list[TeaItem] = []
+        self.weapon_items: list[WeaponItem] = []
+        self.heal_items: list[HealItem] = []
         self.boss: Boss | None = None
 
         self.effects.clear()
@@ -240,9 +312,25 @@ class ShootGame:
         self.next_boss_kill_threshold = self.BOSS_TRIGGER_KILLS
         self.next_boss_score_threshold = self.BOSS_TRIGGER_SCORE
 
-        self.shot_family = self.SHOT_FAMILY_TEA
-        self.shot_level = self.SHOT_LEVEL_SINGLE
+        start_family = self.WEAPON_FAMILY_ORDER[self.start_weapon_index]
+        self.unlocked_weapon_families = [start_family]
+        self.current_weapon_family = start_family
+        self.weapon_levels = {
+            family: (self.SHOT_LEVEL_SINGLE if family == start_family else -1)
+            for family in self.WEAPON_FAMILY_ORDER
+        }
+        self.weapon_overdrive_bonus = {family: 0 for family in self.WEAPON_FAMILY_ORDER}
         self.shot_pick_flash_timer = 0
+        self.tea_drop_bonus = 0.0
+
+        self.reward_choices: list[RewardChoice] = []
+        self.reward_selection_index = 0
+        self.reward_notice_label = "REWARD GET"
+        self.reward_notice_text = ""
+        self.reward_notice_desc = ""
+        self.reward_notice_accent = 10
+        self.reward_notice_kind = "reward"
+        self.reward_notice_timer = 0
 
     def _apply_theme(self, theme_name: str) -> None:
         theme = self.THEMES.get(theme_name, self.THEMES["fresh_night"])
@@ -265,6 +353,12 @@ class ShootGame:
     def _move_theme_selection(self, delta: int) -> None:
         self._set_theme_by_index(self.start_theme_index + delta)
 
+    def _set_start_weapon_by_index(self, index: int) -> None:
+        self.start_weapon_index = index % len(self.WEAPON_FAMILY_ORDER)
+
+    def _move_start_weapon_selection(self, delta: int) -> None:
+        self._set_start_weapon_by_index(self.start_weapon_index + delta)
+
     def _recolor_stars(self) -> None:
         for star in self.stars:
             star[3] = self._random_star_color()
@@ -281,6 +375,8 @@ class ShootGame:
             self.bomb_restock_flash_timer -= 1
         if self.shot_pick_flash_timer > 0:
             self.shot_pick_flash_timer -= 1
+        if self.reward_notice_timer > 0:
+            self.reward_notice_timer -= 1
 
     def _random_star_color(self) -> int:
         return random.choice(self.star_colors)
@@ -328,26 +424,59 @@ class ShootGame:
             float(self.MOBILE_CTRL_RADIUS),
         )
 
+    def _mobile_polar(self, px: float, py: float) -> tuple[float, float]:
+        dx = px - float(self.MOBILE_CTRL_CX)
+        dy = float(self.MOBILE_CTRL_CY) - py
+        distance = math.hypot(dx, dy)
+        angle = math.degrees(math.atan2(dy, dx))
+        return distance, angle
+
+    def _point_in_mobile_arc(
+        self,
+        px: float,
+        py: float,
+        angle_start: float,
+        angle_end: float,
+        inner_radius: float,
+        outer_radius: float,
+    ) -> bool:
+        distance, angle = self._mobile_polar(px, py)
+        return (
+            inner_radius <= distance <= outer_radius
+            and angle_start <= angle <= angle_end
+        )
+
+    def _mobile_arc_point(self, radius: float, angle_deg: float) -> tuple[int, int]:
+        rad = math.radians(angle_deg)
+        x = self.MOBILE_CTRL_CX + math.cos(rad) * radius
+        y = self.MOBILE_CTRL_CY - math.sin(rad) * radius
+        return int(round(x)), int(round(y))
+
+    def _mobile_arc_midpoint(self, angle_start: float, angle_end: float, radius: float) -> tuple[int, int]:
+        return self._mobile_arc_point(radius, (angle_start + angle_end) * 0.5)
+
     def _is_mobile_laser_pressed(self) -> bool:
         if not pyxel.btn(pyxel.MOUSE_BUTTON_LEFT):
             return False
-        return self._point_in_circle(
+        return self._point_in_mobile_arc(
             float(pyxel.mouse_x),
             float(pyxel.mouse_y),
-            float(self.MOBILE_LASER_CX),
-            float(self.MOBILE_LASER_CY),
-            float(self.MOBILE_BTN_R),
+            float(self.MOBILE_LASER_ANGLE_START),
+            float(self.MOBILE_LASER_ANGLE_END),
+            float(self.MOBILE_RING_INNER_RADIUS),
+            float(self.MOBILE_RING_OUTER_RADIUS),
         )
 
     def _is_mobile_bomb_pressed(self) -> bool:
         if not pyxel.btn(pyxel.MOUSE_BUTTON_LEFT):
             return False
-        return self._point_in_circle(
+        return self._point_in_mobile_arc(
             float(pyxel.mouse_x),
             float(pyxel.mouse_y),
-            float(self.MOBILE_BOMB_CX),
-            float(self.MOBILE_BOMB_CY),
-            float(self.MOBILE_BTN_R),
+            float(self.MOBILE_BOMB_ANGLE_START),
+            float(self.MOBILE_BOMB_ANGLE_END),
+            float(self.MOBILE_RING_INNER_RADIUS),
+            float(self.MOBILE_RING_OUTER_RADIUS),
         )
 
     def _update_mobile_action_buttons(self) -> None:
@@ -375,25 +504,391 @@ class ShootGame:
 
         self.prev_touch_down = touch_down
 
-    def _shot_level_name(self) -> str:
+    def _weapon_name(self, family: str | None = None) -> str:
+        family = family or self.current_weapon_family
+        return self.WEAPON_FAMILY_DATA.get(family, self.WEAPON_FAMILY_DATA[self.WEAPON_FAMILY_FAN])["name"]
+
+    def _weapon_accent(self, family: str | None = None) -> int:
+        family = family or self.current_weapon_family
+        return self.WEAPON_FAMILY_DATA.get(family, self.WEAPON_FAMILY_DATA[self.WEAPON_FAMILY_FAN])["accent"]
+
+    def _weapon_colors(self, family: str | None = None) -> tuple[int, int]:
+        family = family or self.current_weapon_family
+        data = self.WEAPON_FAMILY_DATA.get(family, self.WEAPON_FAMILY_DATA[self.WEAPON_FAMILY_FAN])
+        return data["core"], data["outer"]
+
+    def _current_weapon_level(self) -> int:
+        return max(self.SHOT_LEVEL_SINGLE, self.weapon_levels.get(self.current_weapon_family, self.SHOT_LEVEL_SINGLE))
+
+    def _set_weapon_level(self, family: str, level: int) -> None:
+        self.weapon_levels[family] = max(self.SHOT_LEVEL_SINGLE, min(level, self.SHOT_LEVEL_MAX))
+
+    def _weapon_damage_bonus(self, family: str | None = None) -> int:
+        family = family or self.current_weapon_family
+        return max(0, min(self.WEAPON_OVERDRIVE_CAP, self.weapon_overdrive_bonus.get(family, 0)))
+
+    def _is_weapon_unlocked(self, family: str) -> bool:
+        return family in self.unlocked_weapon_families
+
+    def _locked_weapon_families(self) -> list[str]:
+        return [family for family in self.WEAPON_FAMILY_ORDER if family not in self.unlocked_weapon_families]
+
+    def _unlock_weapon_family(self, family: str, equip_now: bool = True) -> None:
+        if family not in self.unlocked_weapon_families:
+            self.unlocked_weapon_families.append(family)
+        if self.weapon_levels.get(family, -1) < self.SHOT_LEVEL_SINGLE:
+            self.weapon_levels[family] = self.SHOT_LEVEL_SINGLE
+        if equip_now:
+            self.current_weapon_family = family
+
+    def _next_unlocked_weapon_family(self, family: str) -> str:
+        if family not in self.unlocked_weapon_families or len(self.unlocked_weapon_families) <= 1:
+            return family
+        idx = self.unlocked_weapon_families.index(family)
+        return self.unlocked_weapon_families[(idx + 1) % len(self.unlocked_weapon_families)]
+
+    def _shot_level_name(self, level: int | None = None) -> str:
+        level = self._current_weapon_level() if level is None else level
         mapping = {
-            self.SHOT_LEVEL_SINGLE: "SINGLE",
-            self.SHOT_LEVEL_DOUBLE: "DOUBLE",
-            self.SHOT_LEVEL_TRIPLE: "TRIPLE",
-            self.SHOT_LEVEL_POWER_SINGLE: "P-SINGLE",
-            self.SHOT_LEVEL_POWER_DOUBLE: "P-DOUBLE",
-            self.SHOT_LEVEL_POWER_TRIPLE: "P-TRIPLE",
+            self.SHOT_LEVEL_SINGLE: "1WAY",
+            self.SHOT_LEVEL_DOUBLE: "2WAY",
+            self.SHOT_LEVEL_TRIPLE: "3WAY",
+            self.SHOT_LEVEL_POWER_SINGLE: "P-1WAY",
+            self.SHOT_LEVEL_POWER_DOUBLE: "P-2WAY",
+            self.SHOT_LEVEL_POWER_TRIPLE: "P-3WAY",
         }
-        return mapping.get(self.shot_level, "SINGLE")
+        return mapping.get(level, "1WAY")
 
-    def _advance_tea_shot(self) -> None:
-        if self.shot_family != self.SHOT_FAMILY_TEA:
-            self.shot_family = self.SHOT_FAMILY_TEA
-            self.shot_level = self.SHOT_LEVEL_POWER_SINGLE
-        else:
-            self.shot_level = min(self.shot_level + 1, self.SHOT_LEVEL_MAX)
+    def _current_shot_cooldown_frames(self) -> int:
+        if self.current_weapon_family != self.WEAPON_FAMILY_BEAM:
+            return self.shoot_interval_frames
 
+        level = self._current_weapon_level()
+        if level <= self.SHOT_LEVEL_TRIPLE:
+            return self.shoot_interval_frames + 8
+        return self.shoot_interval_frames + 10
+
+    def _show_notice(
+        self,
+        *,
+        label: str,
+        title: str,
+        description: str,
+        accent: int,
+        kind: str = "reward",
+    ) -> None:
+        self.reward_notice_label = label
+        self.reward_notice_text = title
+        self.reward_notice_desc = description
+        self.reward_notice_accent = accent
+        self.reward_notice_kind = kind
+        self.reward_notice_timer = self.REWARD_NOTICE_FRAMES
+
+    def _upgrade_weapon_family(self, family: str, switch_if_needed: bool = True) -> None:
+        if not self._is_weapon_unlocked(family):
+            self._unlock_weapon_family(family, equip_now=True)
+            self._show_notice(
+                label="WEAPON GET",
+                title=f"{self._weapon_name(family)} UNLOCK",
+                description=f"Now using {self._weapon_name(family)}",
+                accent=self._weapon_accent(family),
+                kind="shot_up",
+            )
+            self.shot_pick_flash_timer = self.TEA_FLASH_FRAMES
+            return
+
+        previous_family = self.current_weapon_family
+        if switch_if_needed and family != self.current_weapon_family:
+            self.current_weapon_family = family
+            self._show_notice(
+                label="WEAPON CHANGE",
+                title=f"{self._weapon_name(family)} READY",
+                description=f"Switched from {self._weapon_name(previous_family)}",
+                accent=self._weapon_accent(family),
+                kind="shot_up",
+            )
+            self.shot_pick_flash_timer = self.TEA_FLASH_FRAMES
+            return
+
+        if self.weapon_levels.get(family, self.SHOT_LEVEL_SINGLE) >= self.SHOT_LEVEL_MAX:
+            next_bonus = min(self._weapon_damage_bonus(family) + 1, self.WEAPON_OVERDRIVE_CAP)
+            current_bonus = self._weapon_damage_bonus(family)
+            if next_bonus > current_bonus:
+                self.weapon_overdrive_bonus[family] = next_bonus
+                self.shot_pick_flash_timer = self.TEA_FLASH_FRAMES
+                self._show_notice(
+                    label="MAX POWER",
+                    title=f"{self._weapon_name(family)} DRIVE",
+                    description=f"ATK +{next_bonus}",
+                    accent=self._weapon_accent(family),
+                    kind="shot_up",
+                )
+            return
+
+        next_level = min(self.weapon_levels.get(family, self.SHOT_LEVEL_SINGLE) + 1, self.SHOT_LEVEL_MAX)
+        self._set_weapon_level(family, next_level)
         self.shot_pick_flash_timer = self.TEA_FLASH_FRAMES
+        self._show_notice(
+            label="SHOT UP",
+            title=f"{self._weapon_name(family)} BOOST",
+            description=f"Now {self._shot_level_name(next_level)}",
+            accent=self._weapon_accent(family),
+            kind="shot_up",
+        )
+
+    def _tea_drop_rate(self) -> float:
+        return min(0.70, self.TEA_DROP_CHANCE + self.tea_drop_bonus)
+
+    def _next_shot_level_name(self) -> str:
+        next_level = min(self._current_weapon_level() + 1, self.SHOT_LEVEL_MAX)
+        mapping = {
+            self.SHOT_LEVEL_SINGLE: "1WAY",
+            self.SHOT_LEVEL_DOUBLE: "2WAY",
+            self.SHOT_LEVEL_TRIPLE: "3WAY",
+            self.SHOT_LEVEL_POWER_SINGLE: "P-1WAY",
+            self.SHOT_LEVEL_POWER_DOUBLE: "P-2WAY",
+            self.SHOT_LEVEL_POWER_TRIPLE: "P-3WAY",
+        }
+        return mapping.get(next_level, "1WAY")
+
+    def _reward_choice(self, reward_id: str) -> RewardChoice:
+        if reward_id == "weapon_boost":
+            return RewardChoice(
+                reward_id=reward_id,
+                title=f"{self._weapon_name()} BOOST",
+                description=f"Shot level up to {self._next_shot_level_name()}",
+                accent_color=self._weapon_accent(),
+            )
+        if reward_id.startswith("unlock_"):
+            family = reward_id.split("_", 1)[1]
+            return RewardChoice(
+                reward_id=reward_id,
+                title=f"UNLOCK {self._weapon_name(family)}",
+                description=f"Unlock and switch to {self._weapon_name(family)}",
+                accent_color=self._weapon_accent(family),
+            )
+        if reward_id == "max_hp":
+            return RewardChoice(
+                reward_id=reward_id,
+                title="MAX HP UP",
+                description="Max HP +1 and heal fully",
+                accent_color=10,
+            )
+        if reward_id == "bomb_cap":
+            next_cap = self._bomb_capacity() + 1
+            return RewardChoice(
+                reward_id=reward_id,
+                title="BOMB CAP UP",
+                description=f"Carry up to {next_cap} bombs",
+                accent_color=9,
+            )
+        if reward_id == "move_up":
+            next_speed = min(self.PLAYER_SPEED_CAP, self.player.speed_x + 1)
+            return RewardChoice(
+                reward_id=reward_id,
+                title="MOVE UP",
+                description=f"Move faster: speed {next_speed}",
+                accent_color=12,
+            )
+        if reward_id == "laser_tune":
+            next_wait = max(
+                self.LASER_COOLDOWN_MIN,
+                self.laser_cooldown_frames - self.LASER_COOLDOWN_REWARD_STEP,
+            )
+            return RewardChoice(
+                reward_id=reward_id,
+                title="LASER TUNE",
+                description=f"Laser reload: {next_wait} frames",
+                accent_color=14,
+            )
+        if reward_id == "item_rate":
+            next_rate = int(round(min(0.70, self._tea_drop_rate() + self.TEA_DROP_BONUS_STEP) * 100))
+            return RewardChoice(
+                reward_id=reward_id,
+                title="ITEM RATE UP",
+                description=f"Weapon item rate: {next_rate}%",
+                accent_color=3,
+            )
+        return RewardChoice(
+            reward_id="max_hp",
+            title="MAX HP UP",
+            description="Max HP +1 and heal fully",
+            accent_color=10,
+        )
+
+    def _eligible_reward_ids(self) -> list[str]:
+        reward_ids = [
+            "max_hp",
+            "bomb_cap",
+            "item_rate",
+        ]
+
+        if self._current_weapon_level() < self.SHOT_LEVEL_MAX:
+            reward_ids.append("weapon_boost")
+        for family in self._locked_weapon_families():
+            reward_ids.append(f"unlock_{family}")
+        if self.player.speed_x < self.PLAYER_SPEED_CAP or self.player.speed_y < self.PLAYER_SPEED_CAP:
+            reward_ids.append("move_up")
+        if self.laser_cooldown_frames > self.LASER_COOLDOWN_MIN:
+            reward_ids.append("laser_tune")
+
+        return reward_ids
+
+    def _reward_weight(self, reward_id: str) -> float:
+        loop_depth = max(0, self.boss_spawn_count)
+
+        if reward_id == "weapon_boost":
+            missing_levels = self.SHOT_LEVEL_MAX - self._current_weapon_level()
+            return 2.8 + missing_levels * 1.25 + max(0.0, 1.2 - loop_depth * 0.18)
+        if reward_id.startswith("unlock_"):
+            family = reward_id.split("_", 1)[1]
+            family_bias = {
+                self.WEAPON_FAMILY_LANCE: 2.4,
+                self.WEAPON_FAMILY_RAIN: 2.0,
+                self.WEAPON_FAMILY_BEAM: 1.8,
+            }
+            return family_bias.get(family, 1.6) + max(0.0, 1.4 - loop_depth * 0.18)
+
+        if reward_id == "max_hp":
+            missing_hp = self.player.max_hp - self.player.hp
+            low_hp_bonus = 3.2 if self.player.hp <= 1 else 0.0
+            early_survival_bonus = max(0.0, (4 - self.player.max_hp) * 0.75)
+            return 1.8 + missing_hp * 2.1 + low_hp_bonus + early_survival_bonus
+
+        if reward_id == "bomb_cap":
+            return max(0.9, 2.7 - self.bomb_bonus_cap * 0.55 + loop_depth * 0.16)
+
+        if reward_id == "move_up":
+            speed_gap = self.PLAYER_SPEED_CAP - max(self.player.speed_x, self.player.speed_y)
+            return max(0.8, 1.5 + speed_gap * 0.72 - loop_depth * 0.08)
+
+        if reward_id == "laser_tune":
+            cooldown_gap = self.laser_cooldown_frames - self.LASER_COOLDOWN_MIN
+            tune_steps_left = cooldown_gap / max(1, self.LASER_COOLDOWN_REWARD_STEP)
+            return max(0.8, 1.4 + tune_steps_left * 0.8 + loop_depth * 0.18)
+
+        if reward_id == "item_rate":
+            item_steps = self.tea_drop_bonus / max(0.001, self.TEA_DROP_BONUS_STEP)
+            return max(0.7, 2.4 - item_steps * 0.45 + loop_depth * 0.12)
+
+        return 1.0
+
+    def _pick_weighted_reward_ids(self, reward_ids: list[str], count: int) -> list[str]:
+        available = list(reward_ids)
+        picks: list[str] = []
+
+        while available and len(picks) < count:
+            weighted = [(reward_id, max(0.05, self._reward_weight(reward_id))) for reward_id in available]
+            total_weight = sum(weight for _reward_id, weight in weighted)
+
+            if total_weight <= 0.0:
+                picks.append(available.pop(0))
+                continue
+
+            roll = random.uniform(0.0, total_weight)
+            cursor = 0.0
+            selected_id = available[-1]
+
+            for reward_id, weight in weighted:
+                cursor += weight
+                if roll <= cursor:
+                    selected_id = reward_id
+                    break
+
+            picks.append(selected_id)
+            available.remove(selected_id)
+
+        return picks
+
+    def _guaranteed_reward_id(self, reward_ids: list[str]) -> str | None:
+        if "max_hp" in reward_ids and self.player.hp <= 1:
+            return "max_hp"
+
+        if len(self.unlocked_weapon_families) == 1:
+            for family in (self.WEAPON_FAMILY_LANCE, self.WEAPON_FAMILY_RAIN, self.WEAPON_FAMILY_BEAM):
+                reward_id = f"unlock_{family}"
+                if reward_id in reward_ids:
+                    return reward_id
+
+        if "weapon_boost" in reward_ids and self._current_weapon_level() <= self.SHOT_LEVEL_TRIPLE and self.boss_spawn_count <= 1:
+            return "weapon_boost"
+
+        return None
+
+    def _build_reward_choices(self) -> list[RewardChoice]:
+        pool = self._eligible_reward_ids()
+        picks: list[str] = []
+
+        guaranteed_id = self._guaranteed_reward_id(pool)
+        if guaranteed_id is not None:
+            picks.append(guaranteed_id)
+            pool.remove(guaranteed_id)
+
+        remaining = self.REWARD_OPTION_COUNT - len(picks)
+        if remaining > 0:
+            picks.extend(self._pick_weighted_reward_ids(pool, remaining))
+
+        return [self._reward_choice(reward_id) for reward_id in picks[: self.REWARD_OPTION_COUNT]]
+
+    def _start_reward_selection(self) -> None:
+        self.enemies.clear()
+        self.enemy_bullets.clear()
+        self.bullets.clear()
+        self.bombs.clear()
+        self.homing_lasers.clear()
+        self.weapon_items.clear()
+        self.heal_items.clear()
+        self.reward_choices = self._build_reward_choices()
+        self.reward_selection_index = 0
+        self.phase = GamePhase.REWARD_SELECT
+
+    def _apply_reward_choice(self, choice: RewardChoice) -> None:
+        if choice.reward_id == "weapon_boost":
+            self._upgrade_weapon_family(self.current_weapon_family, switch_if_needed=False)
+        elif choice.reward_id.startswith("unlock_"):
+            family = choice.reward_id.split("_", 1)[1]
+            self._unlock_weapon_family(family, equip_now=True)
+            self._show_notice(
+                label="WEAPON GET",
+                title=f"{self._weapon_name(family)} UNLOCK",
+                description=f"Now using {self._weapon_name(family)}",
+                accent=self._weapon_accent(family),
+                kind="shot_up",
+            )
+        elif choice.reward_id == "max_hp":
+            self.player.max_hp += 1
+            self.player.hp = self.player.max_hp
+        elif choice.reward_id == "bomb_cap":
+            self.bomb_bonus_cap += 1
+            self._restock_bombs_full()
+        elif choice.reward_id == "move_up":
+            self.player.speed_x = min(self.PLAYER_SPEED_CAP, self.player.speed_x + 1)
+            self.player.speed_y = min(self.PLAYER_SPEED_CAP, self.player.speed_y + 1)
+        elif choice.reward_id == "laser_tune":
+            self.laser_cooldown_frames = max(
+                self.LASER_COOLDOWN_MIN,
+                self.laser_cooldown_frames - self.LASER_COOLDOWN_REWARD_STEP,
+            )
+            self.laser_cooldown = min(self.laser_cooldown, self.laser_cooldown_frames)
+        elif choice.reward_id == "item_rate":
+            self.tea_drop_bonus += self.TEA_DROP_BONUS_STEP
+
+        if not choice.reward_id.startswith("unlock_") and choice.reward_id != "weapon_boost":
+            self._show_notice(
+                label="REWARD GET",
+                title=choice.title,
+                description=choice.description,
+                accent=choice.accent_color,
+                kind="reward",
+            )
+        self.reward_choices.clear()
+        self.reward_selection_index = 0
+        self.touch_active = False
+        self.touch_drag_active = False
+        self.prev_touch_down = pyxel.btn(pyxel.MOUSE_BUTTON_LEFT)
+        self.boss_defeated = False
+        self.spawn_timer = max(self.spawn_timer, 24)
+        self.phase = GamePhase.PLAYING
 
     def _spawn_player_bullet(
         self,
@@ -407,6 +902,12 @@ class ShootGame:
         color_core: int,
         color_outer: int,
         style: str,
+        max_life: int = 9999,
+        radius_growth: float = 0.0,
+        max_radius: float = 0.0,
+        trail: list[tuple[float, float]] | None = None,
+        piercing: bool = False,
+        ignores_cancel: bool = False,
     ) -> None:
         self.bullets.append(
             Bullet(
@@ -419,14 +920,18 @@ class ShootGame:
                 color_core=color_core,
                 color_outer=color_outer,
                 style=style,
+                max_life=max_life,
+                radius_growth=radius_growth,
+                max_radius=max_radius,
+                trail=[] if trail is None else list(trail),
+                piercing=piercing,
+                ignores_cancel=ignores_cancel,
             )
         )
 
-    def _fire_current_shot(self) -> None:
-        origin_x = float(self.player.x)
-        origin_y = float(self.player.y - self.PLAYER_HALF_H - 6)
-
-        level = self.shot_level
+    def _fire_fan_shot(self, origin_x: float, origin_y: float, level: int) -> None:
+        core_main, outer_main = self._weapon_colors(self.WEAPON_FAMILY_FAN)
+        bonus = self._weapon_damage_bonus(self.WEAPON_FAMILY_FAN)
 
         if level == self.SHOT_LEVEL_SINGLE:
             self._spawn_player_bullet(
@@ -434,23 +939,23 @@ class ShootGame:
                 y=origin_y,
                 vx=0.0,
                 vy=float(self.bullet_speed),
-                damage=1,
+                damage=1 + bonus,
                 radius=3,
-                color_core=10,
-                color_outer=6,
+                color_core=core_main,
+                color_outer=outer_main,
                 style="normal",
             )
             return
 
         if level == self.SHOT_LEVEL_DOUBLE:
-            for vx in (-1.15, 1.15):
+            for vx, xoff in ((-0.90, -4.0), (0.90, 4.0)):
                 self._spawn_player_bullet(
-                    x=origin_x + (vx * 1.2),
+                    x=origin_x + xoff,
                     y=origin_y,
                     vx=vx,
                     vy=float(self.bullet_speed),
-                    damage=1,
-                    radius=3,
+                    damage=1 + bonus,
+                    radius=2,
                     color_core=11,
                     color_outer=3,
                     style="normal",
@@ -458,19 +963,14 @@ class ShootGame:
             return
 
         if level == self.SHOT_LEVEL_TRIPLE:
-            triples = (
-                (-1.25, 0.0, 9, 4),
-                (0.0, 0.0, 10, 6),
-                (1.25, 0.0, 9, 4),
-            )
-            for vx, xoff, core, outer in triples:
+            for vx, xoff, core, outer in ((-1.10, -6.0, 9, 4), (0.0, 0.0, core_main, outer_main), (1.10, 6.0, 9, 4)):
                 self._spawn_player_bullet(
                     x=origin_x + xoff,
                     y=origin_y,
                     vx=vx,
                     vy=float(self.bullet_speed),
-                    damage=1,
-                    radius=3,
+                    damage=1 + bonus,
+                    radius=2,
                     color_core=core,
                     color_outer=outer,
                     style="normal",
@@ -483,8 +983,8 @@ class ShootGame:
                 y=origin_y,
                 vx=0.0,
                 vy=float(self.bullet_speed),
-                damage=2,
-                radius=5,
+                damage=2 + bonus,
+                radius=4,
                 color_core=7,
                 color_outer=11,
                 style="power_single",
@@ -492,55 +992,207 @@ class ShootGame:
             return
 
         if level == self.SHOT_LEVEL_POWER_DOUBLE:
-            for vx, xoff in ((-1.0, -2.0), (1.0, 2.0)):
+            for vx, xoff, radius in ((-0.82, -5.0, 4), (0.82, 5.0, 4)):
                 self._spawn_player_bullet(
                     x=origin_x + xoff,
                     y=origin_y,
                     vx=vx,
                     vy=float(self.bullet_speed),
-                    damage=2,
-                    radius=5,
+                    damage=3 + bonus,
+                    radius=radius,
                     color_core=7,
                     color_outer=11,
                     style="power_double",
                 )
             return
 
-        if level == self.SHOT_LEVEL_POWER_TRIPLE:
-            for vx, xoff in ((-1.05, -2.0), (0.0, 0.0), (1.05, 2.0)):
-                self._spawn_player_bullet(
-                    x=origin_x + xoff,
-                    y=origin_y,
-                    vx=vx,
-                    vy=float(self.bullet_speed),
-                    damage=2,
-                    radius=5,
-                    color_core=7,
-                    color_outer=11,
-                    style="power_triple",
-                )
+        for vx, xoff, radius, damage, style in (
+            (-1.00, -7.0, 3, 3 + bonus, "power_triple"),
+            (0.0, 0.0, 5, 5 + bonus, "power_single"),
+            (1.00, 7.0, 3, 3 + bonus, "power_triple"),
+        ):
+            self._spawn_player_bullet(
+                x=origin_x + xoff,
+                y=origin_y,
+                vx=vx,
+                vy=float(self.bullet_speed),
+                damage=damage,
+                radius=radius,
+                color_core=7,
+                color_outer=11,
+                style=style,
+            )
 
-    def _maybe_spawn_tea_item(self, x: float, y: float) -> None:
-        if random.random() > self.TEA_DROP_CHANCE:
+    def _fire_lance_shot(self, origin_x: float, origin_y: float, level: int) -> None:
+        core, outer = self._weapon_colors(self.WEAPON_FAMILY_LANCE)
+        bonus = self._weapon_damage_bonus(self.WEAPON_FAMILY_LANCE)
+        speed = float(self.bullet_speed + 2.2)
+
+        patterns = {
+            self.SHOT_LEVEL_SINGLE: ((0.0, 0.0, 3, 4, "lance"),),
+            self.SHOT_LEVEL_DOUBLE: ((-0.18, -2.0, 3, 4, "lance"), (0.18, 2.0, 3, 4, "lance")),
+            self.SHOT_LEVEL_TRIPLE: ((-0.22, -3.0, 3, 4, "lance"), (0.0, 0.0, 4, 5, "lance_power"), (0.22, 3.0, 3, 4, "lance")),
+            self.SHOT_LEVEL_POWER_SINGLE: ((0.0, 0.0, 5, 6, "lance_power"),),
+            self.SHOT_LEVEL_POWER_DOUBLE: ((-0.24, -4.0, 5, 6, "lance_power"), (0.24, 4.0, 5, 6, "lance_power")),
+            self.SHOT_LEVEL_POWER_TRIPLE: ((-0.30, -6.0, 5, 6, "lance_power"), (0.0, 0.0, 7, 7, "beam_core"), (0.30, 6.0, 5, 6, "lance_power")),
+        }
+
+        for vx, xoff, damage, radius, style in patterns[level]:
+            self._spawn_player_bullet(
+                x=origin_x + xoff,
+                y=origin_y,
+                vx=vx,
+                vy=speed,
+                damage=damage + bonus,
+                radius=radius,
+                color_core=core,
+                color_outer=outer,
+                style=style,
+            )
+
+    def _fire_rain_shot(self, origin_x: float, origin_y: float, level: int) -> None:
+        core, outer = self._weapon_colors(self.WEAPON_FAMILY_RAIN)
+        bonus = self._weapon_damage_bonus(self.WEAPON_FAMILY_RAIN)
+        speed = float(self.bullet_speed - 2.2)
+        patterns = {
+            self.SHOT_LEVEL_SINGLE: (-16.0, 0.0, 16.0),
+            self.SHOT_LEVEL_DOUBLE: (-24.0, -8.0, 8.0, 24.0),
+            self.SHOT_LEVEL_TRIPLE: (-30.0, -15.0, 0.0, 15.0, 30.0),
+            self.SHOT_LEVEL_POWER_SINGLE: (-24.0, -8.0, 8.0, 24.0),
+            self.SHOT_LEVEL_POWER_DOUBLE: (-32.0, -16.0, 0.0, 16.0, 32.0),
+            self.SHOT_LEVEL_POWER_TRIPLE: (-40.0, -24.0, -8.0, 8.0, 24.0, 40.0),
+        }
+        damage = 1 + bonus
+        radius = 2 if level <= self.SHOT_LEVEL_TRIPLE else 3
+        style = "rain" if level <= self.SHOT_LEVEL_TRIPLE else "rain_power"
+        growth = 0.13 if level <= self.SHOT_LEVEL_TRIPLE else 0.19
+        max_radius = {
+            self.SHOT_LEVEL_SINGLE: 4.0,
+            self.SHOT_LEVEL_DOUBLE: 4.6,
+            self.SHOT_LEVEL_TRIPLE: 5.3,
+            self.SHOT_LEVEL_POWER_SINGLE: 6.1,
+            self.SHOT_LEVEL_POWER_DOUBLE: 7.0,
+            self.SHOT_LEVEL_POWER_TRIPLE: 7.8,
+        }[level]
+        max_life = {
+            self.SHOT_LEVEL_SINGLE: 34,
+            self.SHOT_LEVEL_DOUBLE: 34,
+            self.SHOT_LEVEL_TRIPLE: 36,
+            self.SHOT_LEVEL_POWER_SINGLE: 38,
+            self.SHOT_LEVEL_POWER_DOUBLE: 40,
+            self.SHOT_LEVEL_POWER_TRIPLE: 42,
+        }[level]
+
+        for idx, xoff in enumerate(patterns[level]):
+            vx = -0.85 if idx % 2 == 0 else 0.85
+            self._spawn_player_bullet(
+                x=origin_x + xoff,
+                y=origin_y - abs(xoff) * 0.30,
+                vx=vx,
+                vy=speed,
+                damage=damage,
+                radius=radius,
+                color_core=core,
+                color_outer=outer,
+                style=style,
+                max_life=max_life,
+                radius_growth=growth,
+                max_radius=max_radius,
+            )
+
+    def _fire_beam_shot(self, origin_x: float, origin_y: float, level: int) -> None:
+        core, outer = self._weapon_colors(self.WEAPON_FAMILY_BEAM)
+        bonus = self._weapon_damage_bonus(self.WEAPON_FAMILY_BEAM)
+        speed = float(self.bullet_speed + 2.8)
+        patterns = {
+            self.SHOT_LEVEL_SINGLE: ((0.0, 0.0),),
+            self.SHOT_LEVEL_DOUBLE: ((-0.78, -9.0), (0.78, 9.0)),
+            self.SHOT_LEVEL_TRIPLE: ((-1.18, -18.0), (-0.38, -6.0), (0.38, 6.0), (1.18, 18.0)),
+            self.SHOT_LEVEL_POWER_SINGLE: ((0.0, 0.0),),
+            self.SHOT_LEVEL_POWER_DOUBLE: ((-0.84, -10.0), (0.84, 10.0)),
+            self.SHOT_LEVEL_POWER_TRIPLE: ((-1.24, -20.0), (-0.42, -7.0), (0.42, 7.0), (1.24, 20.0)),
+        }
+        damage = (2 if level <= self.SHOT_LEVEL_TRIPLE else 3) + bonus
+        radius = 2 if level <= self.SHOT_LEVEL_TRIPLE else 3
+        style = "beam_arc" if level <= self.SHOT_LEVEL_TRIPLE else "beam_arc_power"
+        life = 78 if level <= self.SHOT_LEVEL_TRIPLE else 88
+
+        for vx, xoff in patterns[level]:
+            spread_scale = random.uniform(0.94, 1.10)
+            vx_jitter = random.uniform(-0.05, 0.05)
+            xoff_jitter = random.uniform(-1.5, 1.5)
+            self._spawn_player_bullet(
+                x=origin_x + xoff + xoff_jitter,
+                y=origin_y,
+                vx=vx * spread_scale + vx_jitter,
+                vy=speed,
+                damage=damage,
+                radius=radius,
+                color_core=core,
+                color_outer=outer,
+                style=style,
+                max_life=life,
+                trail=[(origin_x + xoff, origin_y)],
+                piercing=True,
+            )
+
+    def _fire_current_shot(self) -> None:
+        origin_x = float(self.player.x)
+        origin_y = float(self.player.y - self.PLAYER_HALF_H - 6)
+        level = self._current_weapon_level()
+        family = self.current_weapon_family
+
+        if family == self.WEAPON_FAMILY_LANCE:
+            self._fire_lance_shot(origin_x, origin_y, level)
+            return
+        if family == self.WEAPON_FAMILY_RAIN:
+            self._fire_rain_shot(origin_x, origin_y, level)
+            return
+        if family == self.WEAPON_FAMILY_BEAM:
+            self._fire_beam_shot(origin_x, origin_y, level)
             return
 
-        self.tea_items.append(
-            TeaItem(
+        self._fire_fan_shot(origin_x, origin_y, level)
+
+    def _maybe_spawn_weapon_item(self, x: float, y: float) -> None:
+        if random.random() > self._tea_drop_rate():
+            return
+
+        family = random.choice(self.unlocked_weapon_families)
+        self.weapon_items.append(
+            WeaponItem(
                 x=x,
                 y=y,
                 vx=random.uniform(-0.25, 0.25),
                 vy=self.TEA_FALL_SPEED + random.uniform(-0.15, 0.18),
+                family=family,
                 bob_phase=random.uniform(0.0, math.tau),
             )
         )
 
-    def _update_tea_items(self) -> None:
-        next_items: list[TeaItem] = []
+    def _maybe_spawn_heal_item(self, x: float, y: float) -> None:
+        if random.random() > self.HEAL_DROP_CANCEL_CHANCE:
+            return
 
-        for item in self.tea_items:
+        self.heal_items.append(
+            HealItem(
+                x=x,
+                y=y,
+                vx=random.uniform(-0.18, 0.18),
+                vy=self.TEA_FALL_SPEED + random.uniform(-0.10, 0.12),
+                bob_phase=random.uniform(0.0, math.tau),
+            )
+        )
+
+    def _update_weapon_items(self) -> None:
+        next_items: list[WeaponItem] = []
+
+        for item in self.weapon_items:
             if not item.active:
                 continue
 
+            if item.switch_lock_timer > 0:
+                item.switch_lock_timer -= 1
             item.bob_phase += self.TEA_BOB_SPEED
             item.x += item.vx + math.sin(item.bob_phase) * 0.45
             item.y += item.vy
@@ -554,12 +1206,47 @@ class ShootGame:
             limit = item.radius + self.TEA_PICKUP_RADIUS
             if dx * dx + dy * dy <= limit * limit:
                 item.active = False
-                self._advance_tea_shot()
+                self._upgrade_weapon_family(item.family)
                 continue
 
             next_items.append(item)
 
-        self.tea_items = next_items
+        self.weapon_items = next_items
+
+    def _update_heal_items(self) -> None:
+        next_items: list[HealItem] = []
+
+        for item in self.heal_items:
+            if not item.active:
+                continue
+
+            item.bob_phase += self.TEA_BOB_SPEED
+            item.x += item.vx + math.sin(item.bob_phase) * 0.38
+            item.y += item.vy
+
+            if item.y > self.HEIGHT + 20:
+                item.active = False
+                continue
+
+            dx = item.x - self.player.x
+            dy = item.y - self.player.y
+            limit = item.radius + self.TEA_PICKUP_RADIUS
+            if dx * dx + dy * dy <= limit * limit:
+                item.active = False
+                if self.player.hp < self.player.max_hp:
+                    self.player.hp = min(self.player.max_hp, self.player.hp + 1)
+                    self._show_notice(
+                        label="HP GET",
+                        title="HEART RECOVER",
+                        description=f"HP {self.player.hp}/{self.player.max_hp}",
+                        accent=8,
+                        kind="shot_up",
+                    )
+                continue
+
+            next_items.append(item)
+
+        self.heal_items = next_items
 
     def _calc_enemy_bullet_max_life(self, vx: float, vy: float) -> int:
         speed = max(0.01, math.hypot(vx, vy))
@@ -667,7 +1354,8 @@ class ShootGame:
         self.bullets.clear()
         self.bombs.clear()
         self.homing_lasers.clear()
-        self.tea_items.clear()
+        self.weapon_items.clear()
+        self.heal_items.clear()
 
     def _spawn_boss(self) -> None:
         self.boss = spawn_boss(
@@ -747,6 +1435,7 @@ class ShootGame:
 
         boss = self.boss
         self.score += self.BOSS_SCORE_VALUE
+        self.player.hp = self.player.max_hp
         self.enemy_bullets.clear()
         self._restock_bombs_full()
 
@@ -759,6 +1448,7 @@ class ShootGame:
         self.boss_event_started = False
         self.boss_defeated = True
         self._advance_boss_progression()
+        self._start_reward_selection()
 
     def _laser_origin(self, boss: Boss) -> tuple[float, float]:
         return boss.x, boss.y + 4.0
@@ -826,6 +1516,10 @@ class ShootGame:
             self._update_retry_input()
             return
 
+        if self.phase == GamePhase.REWARD_SELECT:
+            self._update_reward_select_input()
+            return
+
         self._update_player_state()
         self._update_touch_mode()
         self._update_player_input()
@@ -845,9 +1539,11 @@ class ShootGame:
         self._update_enemy_bullets()
         self._update_bombs()
         self._update_homing_lasers()
-        self._update_tea_items()
+        self._update_weapon_items()
+        self._update_heal_items()
 
         self._handle_projectile_cancellations()
+        self._handle_bullet_weapon_item_collisions()
 
         self._remove_offscreen_bullets()
         self._remove_offscreen_enemy_bullets()
@@ -875,33 +1571,52 @@ class ShootGame:
             self._start_boss_intro()
 
     def _update_start_input(self) -> None:
-        move_left = pyxel.btnp(pyxel.KEY_LEFT) or pyxel.btnp(pyxel.KEY_UP)
-        move_right = pyxel.btnp(pyxel.KEY_RIGHT) or pyxel.btnp(pyxel.KEY_DOWN)
+        if pyxel.btnp(pyxel.KEY_UP):
+            self.start_menu_focus = max(0, self.start_menu_focus - 1)
+        elif pyxel.btnp(pyxel.KEY_DOWN):
+            self.start_menu_focus = min(1, self.start_menu_focus + 1)
 
-        if move_left:
-            self._move_theme_selection(-1)
-        elif move_right:
-            self._move_theme_selection(1)
+        if pyxel.btnp(pyxel.KEY_LEFT):
+            if self.start_menu_focus == 0:
+                self._move_theme_selection(-1)
+            else:
+                self._move_start_weapon_selection(-1)
+        elif pyxel.btnp(pyxel.KEY_RIGHT):
+            if self.start_menu_focus == 0:
+                self._move_theme_selection(1)
+            else:
+                self._move_start_weapon_selection(1)
 
         if pyxel.btnp(pyxel.MOUSE_BUTTON_LEFT):
             mx = float(pyxel.mouse_x)
             my = float(pyxel.mouse_y)
 
             selector_x = 46
-            selector_y = (self.HEIGHT - 260) // 2 + 100
+            selector_y = (self.HEIGHT - 300) // 2 + 100
             selector_w = 268
             selector_h = 54
+            weapon_selector_y = selector_y + 64
 
             start_box_w = 280
             start_box_h = 34
             start_box_x = (self.WIDTH - start_box_w) // 2
-            start_box_y = (self.HEIGHT - 260) // 2 + 198
+            start_box_y = (self.HEIGHT - 300) // 2 + 238
 
             if self._point_in_rect(mx, my, selector_x, selector_y, selector_w * 0.5, selector_h):
+                self.start_menu_focus = 0
                 self._move_theme_selection(-1)
                 return
             if self._point_in_rect(mx, my, selector_x + selector_w * 0.5, selector_y, selector_w * 0.5, selector_h):
+                self.start_menu_focus = 0
                 self._move_theme_selection(1)
+                return
+            if self._point_in_rect(mx, my, selector_x, weapon_selector_y, selector_w * 0.5, selector_h):
+                self.start_menu_focus = 1
+                self._move_start_weapon_selection(-1)
+                return
+            if self._point_in_rect(mx, my, selector_x + selector_w * 0.5, weapon_selector_y, selector_w * 0.5, selector_h):
+                self.start_menu_focus = 1
+                self._move_start_weapon_selection(1)
                 return
             if self._point_in_rect(mx, my, start_box_x, start_box_y, start_box_w, start_box_h):
                 self._reset_play_state()
@@ -922,6 +1637,30 @@ class ShootGame:
         if wants_retry:
             self._reset_play_state()
             self.phase = GamePhase.PLAYING
+
+    def _update_reward_select_input(self) -> None:
+        if not self.reward_choices:
+            self.phase = GamePhase.PLAYING
+            return
+
+        if pyxel.btnp(pyxel.KEY_LEFT) or pyxel.btnp(pyxel.KEY_UP):
+            self.reward_selection_index = (self.reward_selection_index - 1) % len(self.reward_choices)
+        elif pyxel.btnp(pyxel.KEY_RIGHT) or pyxel.btnp(pyxel.KEY_DOWN):
+            self.reward_selection_index = (self.reward_selection_index + 1) % len(self.reward_choices)
+
+        if pyxel.btnp(pyxel.KEY_RETURN) or pyxel.btnp(pyxel.KEY_SPACE):
+            self._apply_reward_choice(self.reward_choices[self.reward_selection_index])
+            return
+
+        if pyxel.btnp(pyxel.MOUSE_BUTTON_LEFT):
+            mx = float(pyxel.mouse_x)
+            my = float(pyxel.mouse_y)
+            for idx, _choice in enumerate(self.reward_choices):
+                box_y = self.REWARD_BOX_START_Y + idx * (self.REWARD_BOX_H + self.REWARD_BOX_GAP)
+                if self._point_in_rect(mx, my, self.REWARD_BOX_X, box_y, self.REWARD_BOX_W, self.REWARD_BOX_H):
+                    self.reward_selection_index = idx
+                    self._apply_reward_choice(self.reward_choices[idx])
+                    return
 
     def _update_player_state(self) -> None:
         if self.player.shoot_cooldown > 0:
@@ -989,13 +1728,13 @@ class ShootGame:
 
         if wants_fire and self.player.shoot_cooldown <= 0:
             self._fire_current_shot()
-            self.player.shoot_cooldown = self.shoot_interval_frames
+            self.player.shoot_cooldown = self._current_shot_cooldown_frames()
 
     def _update_special_input(self) -> None:
         if pyxel.btnp(pyxel.KEY_X):
-            self._try_activate_bomb()
-        if pyxel.btnp(pyxel.KEY_C):
             self._try_activate_homing_laser()
+        if pyxel.btnp(pyxel.KEY_C):
+            self._try_activate_bomb()
 
         self._update_mobile_action_buttons()
 
@@ -1094,9 +1833,31 @@ class ShootGame:
         for bullet in self.bullets:
             if not bullet.active:
                 continue
+            if bullet.hit_cooldowns:
+                bullet.hit_cooldowns = {
+                    target_id: timer - 1
+                    for target_id, timer in bullet.hit_cooldowns.items()
+                    if timer > 1
+                }
+            bullet.age += 1
             bullet.x += bullet.vx
             bullet.y -= bullet.vy
-            if bullet.y < -16 or bullet.x < -16 or bullet.x > self.WIDTH + 16:
+            if bullet.style.startswith("beam_arc"):
+                bullet.vx *= 0.996
+            if bullet.radius_growth > 0.0:
+                bullet.radius += bullet.radius_growth
+                if bullet.max_radius > 0.0:
+                    bullet.radius = min(bullet.radius, bullet.max_radius)
+            if bullet.style.startswith("beam_arc"):
+                bullet.trail.append((bullet.x, bullet.y))
+                trail_limit = 10 if bullet.style == "beam_arc" else 13
+                if len(bullet.trail) > trail_limit:
+                    bullet.trail = bullet.trail[-trail_limit:]
+            if bullet.age >= bullet.max_life:
+                bullet.active = False
+                continue
+            offscreen_margin = 96 if bullet.style.startswith("beam_arc") else 16
+            if bullet.y < -offscreen_margin or bullet.x < -offscreen_margin or bullet.x > self.WIDTH + offscreen_margin:
                 bullet.active = False
                 continue
             next_bullets.append(bullet)
@@ -1325,20 +2086,21 @@ class ShootGame:
 
     def _handle_projectile_cancellations(self) -> None:
         for bullet in self.bullets[:]:
-            removed = False
+            if bullet.ignores_cancel:
+                continue
             for enemy_bullet in self.enemy_bullets[:]:
                 if self._circles_overlap(
                     bullet.x, bullet.y, bullet.radius,
                     enemy_bullet.x, enemy_bullet.y, enemy_bullet.radius,
                 ):
-                    if bullet in self.bullets:
-                        self.bullets.remove(bullet)
+                    self._maybe_spawn_heal_item(enemy_bullet.x, enemy_bullet.y)
                     if enemy_bullet in self.enemy_bullets:
                         self.enemy_bullets.remove(enemy_bullet)
-                    removed = True
+                    if bullet.piercing and bullet.style.startswith("beam_arc"):
+                        continue
+                    if bullet in self.bullets:
+                        self.bullets.remove(bullet)
                     break
-            if removed:
-                continue
 
         for bomb in self.bombs:
             cancel_r = 8.0 if bomb.phase == "launch" else self._bomb_current_radius(bomb) * 0.92
@@ -1350,16 +2112,56 @@ class ShootGame:
                     bomb.x, bomb.y, cancel_r,
                     enemy_bullet.x, enemy_bullet.y, enemy_bullet.radius,
                 ):
+                    self._maybe_spawn_heal_item(enemy_bullet.x, enemy_bullet.y)
                     if enemy_bullet in self.enemy_bullets:
                         self.enemy_bullets.remove(enemy_bullet)
 
         for laser in self.homing_lasers:
             for enemy_bullet in self.enemy_bullets[:]:
                 if self._laser_hits_enemy_bullet(laser, enemy_bullet):
+                    self._maybe_spawn_heal_item(enemy_bullet.x, enemy_bullet.y)
                     if enemy_bullet in self.enemy_bullets:
                         self.enemy_bullets.remove(enemy_bullet)
 
+    def _handle_bullet_weapon_item_collisions(self) -> None:
+        if len(self.unlocked_weapon_families) <= 1:
+            return
+
+        for bullet in self.bullets[:]:
+            for item in self.weapon_items:
+                if not item.active:
+                    continue
+                if item.switch_lock_timer > 0:
+                    continue
+                if bullet.piercing and id(item) in bullet.hit_cooldowns:
+                    continue
+                if not self._circles_overlap(
+                    bullet.x,
+                    bullet.y,
+                    bullet.radius,
+                    item.x,
+                    item.y,
+                    item.radius,
+                ):
+                    continue
+
+                item.family = self._next_unlocked_weapon_family(item.family)
+                item.bob_phase += math.pi / 2
+                item.switch_lock_timer = self.WEAPON_ITEM_SWITCH_LOCK_FRAMES
+                if bullet.piercing:
+                    bullet.hit_cooldowns[id(item)] = 8
+                    break
+                if bullet in self.bullets:
+                    self.bullets.remove(bullet)
+                break
+
     def _is_bullet_hitting_enemy(self, bullet: Bullet, enemy: Enemy) -> bool:
+        if bullet.style.startswith("beam_arc"):
+            hit_r = max(1, int(round(bullet.radius)))
+            for px, py in bullet.trail[-8:]:
+                if self._point_hits_enemy(px, py, hit_r, enemy):
+                    return True
+            return self._point_hits_enemy(bullet.x, bullet.y, hit_r, enemy)
         hit_r = bullet.radius + 1
         return (
             bullet.x - hit_r < enemy.x + enemy.hit_half_w
@@ -1369,6 +2171,12 @@ class ShootGame:
         )
 
     def _is_bullet_hitting_boss(self, bullet: Bullet, boss: Boss) -> bool:
+        if bullet.style.startswith("beam_arc"):
+            hit_r = max(1, int(round(bullet.radius)))
+            for px, py in bullet.trail[-10:]:
+                if self._point_hits_boss(px, py, hit_r, boss):
+                    return True
+            return self._point_hits_boss(bullet.x, bullet.y, hit_r, boss)
         hit_r = bullet.radius + 1
         return (
             bullet.x - hit_r < boss.x + boss.hit_half_w
@@ -1441,7 +2249,7 @@ class ShootGame:
             self.score += enemy.score_value
             self.enemy_kill_count += 1
             self._spawn_enemy_burst(enemy.x, enemy.y, scale=self._enemy_burst_scale_from_enemy(enemy))
-            self._maybe_spawn_tea_item(enemy.x, enemy.y)
+            self._maybe_spawn_weapon_item(enemy.x, enemy.y)
             if enemy in self.enemies:
                 self.enemies.remove(enemy)
             return
@@ -1496,7 +2304,12 @@ class ShootGame:
             for enemy in self.enemies[:]:
                 if not self._is_bullet_hitting_enemy(bullet, enemy):
                     continue
+                if bullet.piercing and id(enemy) in bullet.hit_cooldowns:
+                    continue
                 self._damage_enemy(enemy, bullet.damage, source="shot")
+                if bullet.piercing:
+                    bullet.hit_cooldowns[id(enemy)] = 7
+                    continue
                 if bullet in self.bullets:
                     self.bullets.remove(bullet)
                 break
@@ -1508,7 +2321,14 @@ class ShootGame:
         for bullet in self.bullets[:]:
             if not self._is_bullet_hitting_boss(bullet, self.boss):
                 continue
+            if bullet.piercing and id(self.boss) in bullet.hit_cooldowns:
+                continue
             self._damage_boss(bullet.damage, source="shot")
+            if bullet.piercing:
+                bullet.hit_cooldowns[id(self.boss)] = 5
+                if self.boss is None:
+                    break
+                continue
             if bullet in self.bullets:
                 self.bullets.remove(bullet)
             if self.boss is None:
@@ -1627,12 +2447,14 @@ class ShootGame:
         self._draw_enemies()
         self._draw_boss()
         self._draw_enemy_bullets()
-        self._draw_tea_items()
+        self._draw_weapon_items()
+        self._draw_heal_items()
         self._draw_bullets()
         self._draw_homing_lasers()
         self._draw_effects()
         self._draw_player()
         self._draw_hud()
+        self._draw_reward_notice()
         self._draw_mobile_controls()
 
         if self.boss_intro_timer > 0:
@@ -1640,6 +2462,8 @@ class ShootGame:
 
         if self.phase == GamePhase.START:
             self._draw_start_screen()
+        elif self.phase == GamePhase.REWARD_SELECT:
+            self._draw_reward_select()
         elif self.phase == GamePhase.GAME_OVER:
             self._draw_game_over()
 
@@ -1725,17 +2549,84 @@ class ShootGame:
         if self.phase != GamePhase.PLAYING:
             return
 
-        fill_color = 8
-        border_color = 10
+        fill_color = 1
+        border_color = 5
         if self._is_touch_in_mobile_control_area() and (self.frame_count // 3) % 2 == 0:
-            fill_color = 9
+            fill_color = 2
             border_color = 7
 
-        pyxel.circ(self.MOBILE_CTRL_CX, self.MOBILE_CTRL_CY, self.MOBILE_CTRL_RADIUS, fill_color)
-        pyxel.circb(self.MOBILE_CTRL_CX, self.MOBILE_CTRL_CY, self.MOBILE_CTRL_RADIUS, border_color)
+        pyxel.circ(self.MOBILE_CTRL_CX, self.MOBILE_CTRL_CY, self.MOBILE_RING_OUTER_RADIUS + 4, fill_color)
+        pyxel.circb(self.MOBILE_CTRL_CX, self.MOBILE_CTRL_CY, self.MOBILE_RING_OUTER_RADIUS + 4, border_color)
+        pyxel.circ(self.MOBILE_CTRL_CX, self.MOBILE_CTRL_CY, self.MOBILE_RING_OUTER_RADIUS, 8)
+        pyxel.circb(self.MOBILE_CTRL_CX, self.MOBILE_CTRL_CY, self.MOBILE_RING_OUTER_RADIUS, 6)
 
         self._draw_mobile_laser_button()
         self._draw_mobile_bomb_button()
+        pyxel.circ(self.MOBILE_CTRL_CX, self.MOBILE_CTRL_CY, self.MOBILE_RING_INNER_RADIUS, self.play_bg_color)
+        pyxel.circb(self.MOBILE_CTRL_CX, self.MOBILE_CTRL_CY, self.MOBILE_RING_INNER_RADIUS, 5)
+
+    def _draw_mobile_arc_outline(self, radius: float, angle_start: float, angle_end: float, color: int) -> None:
+        prev_x, prev_y = self._mobile_arc_point(radius, angle_start)
+        for angle in range(int(angle_start) + 2, int(angle_end) + 3, 2):
+            x, y = self._mobile_arc_point(radius, min(angle, angle_end))
+            pyxel.line(prev_x, prev_y, x, y, color)
+            prev_x, prev_y = x, y
+
+    def _draw_mobile_sector_fill(self, radius: float, angle_start: float, angle_end: float, color: int) -> None:
+        prev_x, prev_y = self._mobile_arc_point(radius, angle_start)
+        for angle in range(int(angle_start) + 2, int(angle_end) + 3, 2):
+            x, y = self._mobile_arc_point(radius, min(angle, angle_end))
+            pyxel.tri(
+                self.MOBILE_CTRL_CX,
+                self.MOBILE_CTRL_CY,
+                prev_x,
+                prev_y,
+                x,
+                y,
+                color,
+            )
+            prev_x, prev_y = x, y
+
+    def _draw_mobile_arc_button(
+        self,
+        *,
+        angle_start: float,
+        angle_end: float,
+        fill: int,
+        border: int,
+        title: str,
+        subtitle: str,
+        value: str,
+        pressed: bool,
+        text: int,
+    ) -> None:
+        inner = self.MOBILE_RING_INNER_RADIUS
+        outer = self.MOBILE_RING_OUTER_RADIUS - 4
+
+        self._draw_mobile_sector_fill(outer, angle_start, angle_end, fill)
+
+        self._draw_mobile_arc_outline(inner, angle_start, angle_end, 1)
+        self._draw_mobile_arc_outline(outer, angle_start, angle_end, border)
+
+        sx0, sy0 = self._mobile_arc_point(inner, angle_start)
+        sx1, sy1 = self._mobile_arc_point(outer, angle_start)
+        ex0, ey0 = self._mobile_arc_point(inner, angle_end)
+        ex1, ey1 = self._mobile_arc_point(outer, angle_end)
+        pyxel.line(sx0, sy0, sx1, sy1, border)
+        pyxel.line(ex0, ey0, ex1, ey1, border)
+
+        if pressed:
+            self._draw_mobile_arc_outline(outer + 2, angle_start, angle_end, 7)
+            self._draw_mobile_arc_outline(inner + 2, angle_start, angle_end, 7)
+
+        label_x, label_y = self._mobile_arc_midpoint(angle_start, angle_end, inner + (outer - inner) * 0.62)
+
+        title_x = label_x - len(title) * 2
+        subtitle_x = label_x - len(subtitle) * 2
+        value_x = label_x - len(value) * 2
+        pyxel.text(title_x, label_y - 12, title, text)
+        pyxel.text(subtitle_x, label_y - 1, subtitle, text)
+        pyxel.text(value_x, label_y + 10, value, 1 if pressed else 7)
 
     def _draw_mobile_laser_button(self) -> None:
         ready = self.laser_cooldown <= 0 and len(self.homing_lasers) < self.laser_active_limit
@@ -1755,16 +2646,17 @@ class ShootGame:
             border = 12
             text = 1
 
-        cx = self.MOBILE_LASER_CX
-        cy = self.MOBILE_LASER_CY
-        r = self.MOBILE_BTN_R
-
-        pyxel.circ(cx, cy, r, fill)
-        pyxel.circb(cx, cy, r, border)
-        pyxel.circb(cx, cy, r - 3, border)
-
-        pyxel.text(cx - 14, cy - 8, "LASER", text)
-        pyxel.text(cx - 10, cy + 4, "RDY" if self.laser_cooldown <= 0 else f"{self.laser_cooldown:02d}", text)
+        self._draw_mobile_arc_button(
+            angle_start=self.MOBILE_LASER_ANGLE_START,
+            angle_end=self.MOBILE_LASER_ANGLE_END,
+            fill=fill,
+            border=border,
+            title="LASER",
+            subtitle="SHOT",
+            value="READY" if self.laser_cooldown <= 0 else f"WAIT {self.laser_cooldown:02d}",
+            pressed=pressed,
+            text=text,
+        )
 
     def _draw_mobile_bomb_button(self) -> None:
         ready = self.bomb_stock > 0 and len(self.bombs) < self.bomb_active_limit
@@ -1784,16 +2676,17 @@ class ShootGame:
             border = 10
             text = 1
 
-        cx = self.MOBILE_BOMB_CX
-        cy = self.MOBILE_BOMB_CY
-        r = self.MOBILE_BTN_R
-
-        pyxel.circ(cx, cy, r, fill)
-        pyxel.circb(cx, cy, r, border)
-        pyxel.circb(cx, cy, r - 3, border)
-
-        pyxel.text(cx - 12, cy - 8, "BOMB", text)
-        pyxel.text(cx - 3, cy + 4, str(self.bomb_stock), text)
+        self._draw_mobile_arc_button(
+            angle_start=self.MOBILE_BOMB_ANGLE_START,
+            angle_end=self.MOBILE_BOMB_ANGLE_END,
+            fill=fill,
+            border=border,
+            title="BOMB",
+            subtitle="",
+            value=f"STOCK {self.bomb_stock}",
+            pressed=pressed,
+            text=text,
+        )
 
     def _draw_player(self) -> None:
         blink = True if self.phase == GamePhase.START else (not self.player.is_hit or (self.frame_count // 3) % 2 == 0)
@@ -1814,25 +2707,81 @@ class ShootGame:
         for bullet in self.bullets:
             bx = int(bullet.x)
             by = int(bullet.y)
+            br = max(1, int(round(bullet.radius)))
 
             if bullet.style == "normal":
                 pyxel.line(bx, by + 6, bx, by - 3, bullet.color_outer)
-                pyxel.circ(bx, by, bullet.radius, bullet.color_core)
+                pyxel.circ(bx, by, br, bullet.color_core)
             elif bullet.style == "power_single":
                 pyxel.line(bx, by + 8, bx, by - 6, bullet.color_outer)
-                pyxel.circ(bx, by, bullet.radius, bullet.color_core)
-                pyxel.circb(bx, by, bullet.radius + 1, 15)
+                pyxel.circ(bx, by, br, bullet.color_core)
+                pyxel.circb(bx, by, br + 1, 15)
             elif bullet.style == "power_double":
                 pyxel.line(bx, by + 8, bx, by - 5, bullet.color_outer)
-                pyxel.circ(bx, by, bullet.radius, bullet.color_core)
+                pyxel.circ(bx, by, br, bullet.color_core)
                 pyxel.pset(bx, by, 15)
             elif bullet.style == "power_triple":
                 pyxel.line(bx, by + 8, bx, by - 6, bullet.color_outer)
-                pyxel.circ(bx, by, bullet.radius, bullet.color_core)
-                pyxel.circb(bx, by, bullet.radius + 1, 7)
+                pyxel.circ(bx, by, br, bullet.color_core)
+                pyxel.circb(bx, by, br + 1, 7)
+            elif bullet.style == "lance":
+                pyxel.line(bx, by + 9, bx, by - 8, bullet.color_outer)
+                pyxel.line(bx - 2, by + 4, bx - 2, by - 2, bullet.color_outer)
+                pyxel.line(bx - 1, by + 6, bx - 1, by - 4, bullet.color_core)
+                pyxel.line(bx + 1, by + 6, bx + 1, by - 4, bullet.color_core)
+                pyxel.line(bx + 2, by + 4, bx + 2, by - 2, bullet.color_outer)
+                pyxel.pset(bx, by - 9, 7)
+            elif bullet.style == "lance_power":
+                pyxel.line(bx, by + 10, bx, by - 10, bullet.color_outer)
+                pyxel.line(bx - 2, by + 7, bx - 2, by - 5, bullet.color_outer)
+                pyxel.line(bx - 1, by + 8, bx - 1, by - 6, bullet.color_core)
+                pyxel.line(bx + 1, by + 8, bx + 1, by - 6, bullet.color_core)
+                pyxel.line(bx + 2, by + 7, bx + 2, by - 5, bullet.color_outer)
+                pyxel.circb(bx, by - 4, max(2, br - 2), 7)
+            elif bullet.style == "rain":
+                r = max(1, int(round(bullet.radius)))
+                pyxel.circb(bx, by, r, bullet.color_outer)
+                if r >= 2:
+                    pyxel.circb(bx, by, max(1, r - 2), bullet.color_core)
+                pyxel.pset(bx, by, 7)
+            elif bullet.style == "rain_power":
+                r = max(2, int(round(bullet.radius)))
+                pyxel.circb(bx, by, r, bullet.color_outer)
+                pyxel.circb(bx, by, max(1, r - 2), bullet.color_core)
+                if r >= 5:
+                    pyxel.circb(bx, by, max(1, r - 4), 7)
+                pyxel.pset(bx, by, 15)
+            elif bullet.style == "beam":
+                pyxel.rect(bx - 1, by - 7, 3, 12, bullet.color_outer)
+                pyxel.rect(bx, by - 6, 1, 10, bullet.color_core)
+            elif bullet.style == "beam_core":
+                pyxel.rect(bx - 2, by - 8, 5, 14, bullet.color_outer)
+                pyxel.rect(bx - 1, by - 7, 3, 12, bullet.color_core)
+                pyxel.line(bx, by - 9, bx, by + 6, 7)
+            elif bullet.style == "beam_arc":
+                trail = bullet.trail[-8:]
+                for idx in range(1, len(trail)):
+                    x0, y0 = trail[idx - 1]
+                    x1, y1 = trail[idx]
+                    shade = bullet.color_outer if idx < len(trail) - 2 else bullet.color_core
+                    pyxel.line(int(x0), int(y0), int(x1), int(y1), shade)
+                pyxel.line(bx, by + 2, bx, by - 6, bullet.color_core)
+                pyxel.pset(bx, by - 7, 7)
+            elif bullet.style == "beam_arc_power":
+                trail = bullet.trail[-11:]
+                for idx in range(1, len(trail)):
+                    x0, y0 = trail[idx - 1]
+                    x1, y1 = trail[idx]
+                    shade = bullet.color_outer if idx < len(trail) - 3 else bullet.color_core
+                    pyxel.line(int(x0), int(y0), int(x1), int(y1), shade)
+                    pyxel.line(int(x0), int(y0) + 1, int(x1), int(y1) + 1, bullet.color_core)
+                pyxel.line(bx - 1, by + 2, bx - 1, by - 7, bullet.color_outer)
+                pyxel.line(bx, by + 3, bx, by - 8, bullet.color_core)
+                pyxel.line(bx + 1, by + 2, bx + 1, by - 7, bullet.color_outer)
+                pyxel.pset(bx, by - 8, 15)
             else:
                 pyxel.line(bx, by + 6, bx, by - 3, bullet.color_outer)
-                pyxel.circ(bx, by, bullet.radius, bullet.color_core)
+                pyxel.circ(bx, by, br, bullet.color_core)
 
     def _draw_enemy_bullets(self) -> None:
         for bullet in self.enemy_bullets:
@@ -1843,22 +2792,49 @@ class ShootGame:
             if bullet.radius >= 5:
                 pyxel.circb(bx, by, bullet.radius, 7)
 
-    def _draw_tea_items(self) -> None:
-        for item in self.tea_items:
+    def _draw_weapon_items(self) -> None:
+        for item in self.weapon_items:
+            ix = int(item.x)
+            iy = int(item.y)
+            accent = self._weapon_accent(item.family)
+            ring_color = 7 if item.switch_lock_timer <= 0 or (self.frame_count // 6) % 2 == 0 else 13
+
+            pyxel.circ(ix, iy, 7, accent)
+            pyxel.circb(ix, iy, 7, ring_color)
+
+            if item.family == self.WEAPON_FAMILY_FAN:
+                pyxel.rect(ix - 3, iy - 2, 6, 5, 3)
+                pyxel.line(ix + 6, iy - 1, ix + 9, iy + 1, 7)
+                pyxel.line(ix + 9, iy + 1, ix + 8, iy + 4, 7)
+                pyxel.pset(ix - 1, iy - 1, 11)
+                pyxel.pset(ix, iy - 2, 11)
+                pyxel.pset(ix + 1, iy - 1, 11)
+            elif item.family == self.WEAPON_FAMILY_LANCE:
+                pyxel.line(ix, iy + 5, ix, iy - 5, 7)
+                pyxel.line(ix - 1, iy + 3, ix - 1, iy - 2, 8)
+                pyxel.line(ix + 1, iy + 3, ix + 1, iy - 2, 8)
+                pyxel.tri(ix, iy - 7, ix - 3, iy - 1, ix + 3, iy - 1, 15)
+            elif item.family == self.WEAPON_FAMILY_RAIN:
+                pyxel.line(ix, iy + 4, ix, iy - 3, 7)
+                pyxel.pset(ix, iy - 5, 12)
+                pyxel.pset(ix - 2, iy - 1, 15)
+                pyxel.pset(ix + 2, iy + 1, 15)
+            elif item.family == self.WEAPON_FAMILY_BEAM:
+                pyxel.rect(ix - 2, iy - 5, 5, 10, 14)
+                pyxel.rect(ix - 1, iy - 4, 3, 8, 7)
+                pyxel.pset(ix, iy - 6, 15)
+
+    def _draw_heal_items(self) -> None:
+        for item in self.heal_items:
             ix = int(item.x)
             iy = int(item.y)
 
-            cup_color = 11 if (self.frame_count // 6) % 2 == 0 else 10
-            leaf_color = 3
-
-            pyxel.circ(ix, iy, 7, cup_color)
+            pyxel.circ(ix, iy, 7, 13)
             pyxel.circb(ix, iy, 7, 7)
-            pyxel.rect(ix - 3, iy - 2, 6, 5, 3)
-            pyxel.line(ix + 6, iy - 1, ix + 9, iy + 1, 7)
-            pyxel.line(ix + 9, iy + 1, ix + 8, iy + 4, 7)
-            pyxel.pset(ix - 1, iy - 1, leaf_color)
-            pyxel.pset(ix, iy - 2, leaf_color)
-            pyxel.pset(ix + 1, iy - 1, leaf_color)
+            pyxel.circ(ix - 2, iy - 1, 3, 8)
+            pyxel.circ(ix + 2, iy - 1, 3, 8)
+            pyxel.tri(ix - 6, iy, ix + 6, iy, ix, iy + 7, 8)
+            pyxel.pset(ix, iy + 2, 7)
 
     def _draw_bombs(self) -> None:
         for bomb in self.bombs:
@@ -2032,19 +3008,23 @@ class ShootGame:
                 0.0, boss.display_scale,
             )
 
+        aura_cx = int(round(boss.x + self.BOSS_AURA_CENTER_X_OFFSET))
+        aura_cy = int(round(boss.y + self.BOSS_AURA_CENTER_Y_OFFSET))
+
         if getattr(boss, "entry_invulnerable", False):
-            aura_r = int(max(draw_w, draw_h) * 0.55)
+            aura_r = int(max(draw_w, draw_h) * 0.78)
             aura_color = 12 if (self.frame_count // 4) % 2 == 0 else 7
-            pyxel.circb(int(boss.x), int(boss.y), aura_r, aura_color)
-            pyxel.circb(int(boss.x), int(boss.y), max(8, aura_r - 4), 6)
+            pyxel.circb(aura_cx, aura_cy, aura_r, aura_color)
+            pyxel.circb(aura_cx, aura_cy, max(14, aura_r - 6), 6)
+            pyxel.circb(aura_cx, aura_cy, max(10, aura_r - 12), 7)
 
         if getattr(boss, "shield_timer", 0) > 0:
-            base_r = int(max(draw_w, draw_h) * 0.58)
+            base_r = int(max(draw_w, draw_h) * 0.82)
             c1 = 12 if (self.frame_count // 3) % 2 == 0 else 7
             c2 = 6 if (self.frame_count // 5) % 2 == 0 else 13
-            pyxel.circb(int(boss.x), int(boss.y), base_r, c1)
-            pyxel.circb(int(boss.x), int(boss.y), base_r + 4, c2)
-            pyxel.circb(int(boss.x), int(boss.y), max(10, base_r - 5), 7)
+            pyxel.circb(aura_cx, aura_cy, base_r, c1)
+            pyxel.circb(aura_cx, aura_cy, base_r + 8, c2)
+            pyxel.circb(aura_cx, aura_cy, max(16, base_r - 10), 7)
 
         if getattr(boss, "summon_flash_timer", 0) > 0:
             flash_r = int(max(draw_w, draw_h) * 0.70)
@@ -2161,18 +3141,224 @@ class ShootGame:
         laser_text_color = 7
 
         draw_big_text(8, 74, "BOMB", 1, bomb_label_color, shadow_color=1)
-        draw_big_text(52, 74, f"X {self.bomb_stock}/{self._bomb_capacity()}", 1, bomb_value_color, shadow_color=1)
+        draw_big_text(52, 74, f"C {self.bomb_stock}/{self._bomb_capacity()}", 1, bomb_value_color, shadow_color=1)
 
         laser_status = "READY" if self.laser_cooldown <= 0 else f"WAIT{self.laser_cooldown:02d}"
+        draw_big_text(182, 74, "WEAPON", 1, 11 if self.shot_pick_flash_timer > 0 else 13, shadow_color=1)
+        self._draw_weapon_meter(248, 76)
+
         draw_big_text(8, 92, "LASER", 1, 13, shadow_color=1)
         draw_big_text(
             60,
             92,
-            f"C {laser_status} {len(self.homing_lasers)}/{self.laser_active_limit}",
+            f"X {laser_status} {len(self.homing_lasers)}/{self.laser_active_limit}",
             1,
             laser_text_color,
             shadow_color=1,
         )
+
+    def _draw_weapon_meter(self, x: int, y: int) -> None:
+        filled = self._current_weapon_level() + 1
+        block_w = 12
+        block_h = 10
+        gap = 4
+        accent = self._weapon_accent() if self.shot_pick_flash_timer <= 0 or (self.frame_count // 3) % 2 != 0 else 15
+
+        for idx in range(6):
+            bx = x + idx * (block_w + gap)
+            active = idx < filled
+            if active:
+                fill = accent if idx >= 3 else self._weapon_colors()[0]
+                border = 7
+            else:
+                fill = 1
+                border = 5
+
+            pyxel.rect(bx, y, block_w, block_h, fill)
+            pyxel.rectb(bx, y, block_w, block_h, border)
+
+        pyxel.text(x, y + 13, self._weapon_name(), self._weapon_accent())
+
+    def _draw_reward_notice(self) -> None:
+        if self.reward_notice_timer <= 0 or self.phase != GamePhase.PLAYING:
+            return
+
+        elapsed = self.REWARD_NOTICE_FRAMES - self.reward_notice_timer
+        intro = min(1.0, elapsed / self.REWARD_CUTIN_IN_FRAMES)
+        outro = min(1.0, self.reward_notice_timer / self.REWARD_CUTIN_OUT_FRAMES)
+        visibility = min(intro, outro)
+        eased = 1.0 - (1.0 - visibility) ** 3
+
+        panel_w = self.REWARD_CUTIN_W
+        panel_h = self.REWARD_CUTIN_H
+        slant = self.REWARD_CUTIN_SLANT
+        target_x = 8
+        start_x = -panel_w - slant - 36
+        box_x = int(start_x + (target_x - start_x) * eased)
+        box_y = self.REWARD_CUTIN_Y
+        accent = self.reward_notice_accent
+
+        pulse = (self.frame_count // 3) % 2 == 0
+        flash_x = box_x - 40 + ((elapsed * 11) % (panel_w + 96))
+
+        pyxel.rect(box_x + 4, box_y + 4, panel_w - slant + 10, panel_h, 0)
+        pyxel.tri(
+            box_x + panel_w - slant + 4,
+            box_y + 4,
+            box_x + panel_w + 8,
+            box_y + 4,
+            box_x + panel_w - slant + 4,
+            box_y + panel_h + 4,
+            0,
+        )
+
+        pyxel.rect(box_x, box_y, panel_w - slant, panel_h, 10)
+        pyxel.tri(
+            box_x + panel_w - slant,
+            box_y,
+            box_x + panel_w,
+            box_y,
+            box_x + panel_w - slant,
+            box_y + panel_h,
+            10,
+        )
+
+        pyxel.rect(box_x, box_y + panel_h - 16, panel_w - slant, 16, 9)
+        pyxel.tri(
+            box_x + panel_w - slant,
+            box_y + panel_h - 16,
+            box_x + panel_w,
+            box_y + panel_h - 16,
+            box_x + panel_w - slant,
+            box_y + panel_h,
+            9,
+        )
+
+        pyxel.line(box_x, box_y, box_x + panel_w - slant, box_y, 7)
+        pyxel.line(box_x, box_y + panel_h - 1, box_x + panel_w - slant, box_y + panel_h - 1, 1)
+        pyxel.line(box_x + panel_w - slant, box_y, box_x + panel_w, box_y, 7)
+        pyxel.line(box_x + panel_w - slant, box_y + panel_h - 1, box_x + panel_w - slant, box_y + panel_h - 1, 1)
+        pyxel.line(box_x, box_y, box_x, box_y + panel_h - 1, 1)
+        pyxel.line(box_x + panel_w - slant, box_y, box_x + panel_w - slant, box_y + panel_h - 1, 1)
+        pyxel.line(box_x + panel_w, box_y, box_x + panel_w - slant, box_y + panel_h - 1, 1)
+
+        sparkle_points = (
+            (82, 14, 7),
+            (118, 22, accent),
+            (154, 12, 15),
+            (176, 44, 7),
+            (208, 18, accent),
+            (196, 52, 15),
+        )
+        sparkle_shift = (elapsed // 2) % 6
+        for idx, (sx, sy, color) in enumerate(sparkle_points):
+            if (idx + sparkle_shift) % 2 != 0:
+                continue
+            px = box_x + sx
+            py = box_y + sy
+            pyxel.pset(px, py, color)
+            pyxel.pset(px - 1, py, 7)
+            pyxel.pset(px + 1, py, 7)
+            pyxel.pset(px, py - 1, 7)
+            pyxel.pset(px, py + 1, 7)
+            if idx % 3 == 0:
+                pyxel.pset(px - 1, py - 1, 15)
+                pyxel.pset(px + 1, py + 1, 15)
+
+        pyxel.rect(box_x + 8, box_y + 8, 58, 14, 0)
+        pyxel.text(box_x + 14, box_y + 12, self.reward_notice_label, 10)
+
+        if self.reward_notice_kind == "shot_up":
+            arrow_x = box_x + 20
+            arrow_y = box_y + 30
+            pyxel.rect(arrow_x + 8, arrow_y + 8, 6, 18, accent)
+            pyxel.rectb(arrow_x + 8, arrow_y + 8, 6, 18, 7)
+            pyxel.tri(arrow_x + 11, arrow_y - 4, arrow_x + 2, arrow_y + 10, arrow_x + 20, arrow_y + 10, accent)
+            pyxel.tri(arrow_x + 11, arrow_y - 8, arrow_x - 2, arrow_y + 12, arrow_x + 24, arrow_y + 12, 7)
+            pyxel.pset(arrow_x + 11, arrow_y - 10, 15)
+            pyxel.pset(arrow_x + 6, arrow_y + 18, 15)
+            pyxel.pset(arrow_x + 16, arrow_y + 18, 15)
+        else:
+            chevron_y = box_y + 34
+            for idx in range(3):
+                cx = box_x + 14 + idx * 12
+                pyxel.tri(cx, chevron_y, cx + 8, chevron_y + 6, cx, chevron_y + 12, 0)
+
+        pyxel.rect(box_x + 44, box_y + 27, 4, 26, 0)
+        pyxel.rect(box_x + 50, box_y + 27, 6, 26, accent)
+
+        title_color = 0 if pulse else 1
+        draw_big_text(box_x + 64, box_y + 18, self.reward_notice_text, 2, title_color, shadow_color=7)
+        draw_big_text(box_x + 64, box_y + 47, self.reward_notice_desc, 1, 0, shadow_color=7)
+
+        if box_x <= flash_x <= box_x + panel_w:
+            pyxel.line(flash_x, box_y + 4, flash_x + 20, box_y + panel_h - 6, 7)
+            pyxel.line(flash_x + 1, box_y + 4, flash_x + 21, box_y + panel_h - 6, 15)
+
+        pyxel.tri(
+            box_x + panel_w - 18,
+            box_y + 10,
+            box_x + panel_w - 6,
+            box_y + 20,
+            box_x + panel_w - 22,
+            box_y + 30,
+            accent,
+        )
+        pyxel.tri(
+            box_x + panel_w - 26,
+            box_y + 30,
+            box_x + panel_w - 10,
+            box_y + 42,
+            box_x + panel_w - 30,
+            box_y + 54,
+            0,
+        )
+
+    def _draw_reward_select(self) -> None:
+        pyxel.rect(18, self.HUD_H + 18, self.WIDTH - 36, self.HEIGHT - self.HUD_H - 36, 1)
+        pyxel.rectb(18, self.HUD_H + 18, self.WIDTH - 36, self.HEIGHT - self.HUD_H - 36, 10)
+        pyxel.rectb(21, self.HUD_H + 21, self.WIDTH - 42, self.HEIGHT - self.HUD_H - 42, 7)
+
+        title = "REWARD SELECT"
+        sub = "CHOOSE ONE UPGRADE"
+        info = "ARROWS OR TAP A CARD"
+
+        title_x = (self.WIDTH - big_text_width(title, 3)) // 2
+        sub_x = (self.WIDTH - big_text_width(sub, 2)) // 2
+        info_x = (self.WIDTH - big_text_width(info, 1)) // 2
+
+        draw_big_text(title_x, self.HUD_H + 34, title, 3, 10, shadow_color=1)
+        draw_big_text(sub_x, self.HUD_H + 68, sub, 2, 7, shadow_color=1)
+        draw_big_text(info_x, self.HUD_H + 90, info, 1, 12, shadow_color=1)
+
+        for idx, choice in enumerate(self.reward_choices):
+            box_x = self.REWARD_BOX_X
+            box_y = self.REWARD_BOX_START_Y + idx * (self.REWARD_BOX_H + self.REWARD_BOX_GAP)
+            selected = idx == self.reward_selection_index
+
+            fill = 2 if not selected else 0
+            border = choice.accent_color if not selected else 7
+            inner = 5 if not selected else choice.accent_color
+
+            pyxel.rect(box_x, box_y, self.REWARD_BOX_W, self.REWARD_BOX_H, fill)
+            pyxel.rectb(box_x, box_y, self.REWARD_BOX_W, self.REWARD_BOX_H, border)
+            pyxel.rectb(box_x + 3, box_y + 3, self.REWARD_BOX_W - 6, self.REWARD_BOX_H - 6, inner)
+
+            if selected and (self.frame_count // 4) % 2 == 0:
+                pyxel.rectb(box_x - 2, box_y - 2, self.REWARD_BOX_W + 4, self.REWARD_BOX_H + 4, 10)
+
+            pyxel.rect(box_x + 10, box_y + 10, 18, self.REWARD_BOX_H - 20, choice.accent_color)
+            pyxel.text(box_x + 14, box_y + 16, str(idx + 1), 1)
+
+            title_color = 7 if selected else choice.accent_color
+            desc_color = 12 if selected else 7
+
+            draw_big_text(box_x + 40, box_y + 18, choice.title, 2, title_color, shadow_color=1)
+            draw_big_text(box_x + 40, box_y + 52, choice.description, 1, desc_color, shadow_color=1)
+
+        footer = "ENTER / SPACE TO CONFIRM"
+        footer_x = (self.WIDTH - big_text_width(footer, 1)) // 2
+        draw_big_text(footer_x, self.HEIGHT - 30, footer, 1, 10, shadow_color=1)
 
     def _draw_selector_arrow(self, x: int, y: int, direction: int, color: int) -> None:
         if direction < 0:
@@ -2182,7 +3368,7 @@ class ShootGame:
 
     def _draw_start_screen(self) -> None:
         box_w = 320
-        box_h = 260
+        box_h = 300
         box_x = (self.WIDTH - box_w) // 2
         box_y = (self.HEIGHT - box_h) // 2
 
@@ -2209,14 +3395,19 @@ class ShootGame:
         selector_y = box_y + 100
         selector_w = box_w - 52
         selector_h = 54
+        weapon_selector_y = selector_y + 64
 
         start_box_w = 280
         start_box_h = 34
         start_box_x = (self.WIDTH - start_box_w) // 2
-        start_box_y = box_y + 198
+        start_box_y = box_y + 238
+
+        theme_border = 10 if self.start_menu_focus == 0 else 6
+        start_weapon = self.WEAPON_FAMILY_ORDER[self.start_weapon_index]
+        weapon_border = self._weapon_accent(start_weapon) if self.start_menu_focus == 1 else 6
 
         pyxel.rect(selector_x, selector_y, selector_w, selector_h, 1)
-        pyxel.rectb(selector_x, selector_y, selector_w, selector_h, 6)
+        pyxel.rectb(selector_x, selector_y, selector_w, selector_h, theme_border)
         pyxel.rectb(selector_x + 2, selector_y + 2, selector_w - 4, selector_h - 4, 11)
 
         pyxel.text(selector_x + 10, selector_y + 8, "THEME SELECT", 12)
@@ -2231,13 +3422,28 @@ class ShootGame:
         theme_x = (self.WIDTH - big_text_width(theme_text, theme_scale)) // 2
         draw_big_text(theme_x, selector_y + 18, theme_text, theme_scale, 7)
 
+        pyxel.rect(selector_x, weapon_selector_y, selector_w, selector_h, 1)
+        pyxel.rectb(selector_x, weapon_selector_y, selector_w, selector_h, weapon_border)
+        pyxel.rectb(selector_x + 2, weapon_selector_y + 2, selector_w - 4, selector_h - 4, self._weapon_accent(start_weapon))
+
+        pyxel.text(selector_x + 10, weapon_selector_y + 8, "START WEAPON", 12)
+        pyxel.text(selector_x + 10, weapon_selector_y + 42, "UP / DOWN FOCUS, LEFT / RIGHT CHANGE", 7)
+
+        arrow_y = weapon_selector_y + 20
+        self._draw_selector_arrow(selector_x + 12, arrow_y, -1, self._weapon_accent(start_weapon))
+        self._draw_selector_arrow(selector_x + selector_w - 22, arrow_y, 1, self._weapon_accent(start_weapon))
+
+        weapon_text = self._weapon_name(start_weapon)
+        weapon_x = (self.WIDTH - big_text_width(weapon_text, theme_scale)) // 2
+        draw_big_text(weapon_x, weapon_selector_y + 18, weapon_text, theme_scale, self._weapon_accent(start_weapon), shadow_color=1)
+
         pyxel.rect(start_box_x, start_box_y, start_box_w, start_box_h, 1)
         pyxel.rectb(start_box_x, start_box_y, start_box_w, start_box_h, 10)
         pyxel.rectb(start_box_x + 2, start_box_y + 2, start_box_w - 4, start_box_h - 4, 11)
         draw_big_text(start_x, start_box_y + 8, start_text, start_scale, 7, shadow_color=1)
 
-        pyxel.text(box_x + 18, box_y + 236, "GREEN TEA BOOSTS SHOT POWER", 11)
-        pyxel.text(box_x + 18, box_y + 248, "BOMB / LASER AVAILABLE ON MOBILE", 10)
+        pyxel.text(box_x + 18, box_y + 276, "WEAPON ITEMS SWITCH OR BOOST SHOTS", 11)
+        pyxel.text(box_x + 18, box_y + 288, "BOMB / LASER AVAILABLE ON MOBILE", 10)
 
     def _draw_game_over(self) -> None:
         box_w = 248

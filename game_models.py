@@ -7,6 +7,7 @@ from enum import Enum, auto
 class GamePhase(Enum):
     START = auto()
     PLAYING = auto()
+    REWARD_SELECT = auto()
     GAME_OVER = auto()
 
 
@@ -17,10 +18,18 @@ class Bullet:
     vy: float
     vx: float = 0.0
     damage: int = 1
-    radius: int = 3
+    radius: float = 3.0
     color_core: int = 10
     color_outer: int = 6
     style: str = "normal"
+    age: int = 0
+    max_life: int = 9999
+    radius_growth: float = 0.0
+    max_radius: float = 0.0
+    trail: list[tuple[float, float]] = field(default_factory=list)
+    hit_cooldowns: dict[int, int] = field(default_factory=dict)
+    piercing: bool = False
+    ignores_cancel: bool = False
     active: bool = True
 
 
@@ -137,7 +146,20 @@ class HomingLaser:
 
 
 @dataclass
-class TeaItem:
+class WeaponItem:
+    x: float
+    y: float
+    vx: float
+    vy: float
+    family: str
+    radius: int = 8
+    bob_phase: float = 0.0
+    switch_lock_timer: int = 0
+    active: bool = True
+
+
+@dataclass
+class HealItem:
     x: float
     y: float
     vx: float
@@ -145,3 +167,11 @@ class TeaItem:
     radius: int = 8
     bob_phase: float = 0.0
     active: bool = True
+
+
+@dataclass
+class RewardChoice:
+    reward_id: str
+    title: str
+    description: str
+    accent_color: int = 10
