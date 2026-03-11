@@ -542,6 +542,7 @@ def _boss_fire(
     phase = boss_phase(boss)
     pattern = boss.pattern_cycle % 3
     bonus_level = min(3, spawn_count)
+    soften_rage = spawn_count >= 4 and phase == 3
 
     if phase == 1:
         if pattern == 0:
@@ -637,7 +638,7 @@ def _boss_fire(
                 boss=boss,
                 player_x=player_x,
                 player_y=player_y,
-                ways=9,
+                ways=8 if soften_rage else 9,
                 spread=0.52,
                 speed=3.9,
                 radius=5,
@@ -648,7 +649,7 @@ def _boss_fire(
                 boss=boss,
                 player_x=player_x,
                 player_y=player_y,
-                ways=5,
+                ways=4 if soften_rage else 5,
                 spread=0.18,
                 speed=4.4,
                 radius=4,
@@ -658,7 +659,7 @@ def _boss_fire(
         elif pattern == 1:
             _spawn_boss_ring(
                 boss=boss,
-                count=18,
+                count=16 if soften_rage else 18,
                 speed=3.0,
                 radius=4,
                 color=14,
@@ -667,7 +668,7 @@ def _boss_fire(
             )
             _spawn_boss_ring(
                 boss=boss,
-                count=9,
+                count=8 if soften_rage else 9,
                 speed=2.3,
                 radius=4,
                 color=10,
@@ -677,7 +678,7 @@ def _boss_fire(
         else:
             _spawn_boss_down_fan(
                 boss=boss,
-                vx_values=(-3.2, -2.6, -2.0, -1.4, -0.8, 0.0, 0.8, 1.4, 2.0, 2.6, 3.2),
+                vx_values=(-2.8, -2.1, -1.4, -0.7, 0.0, 0.7, 1.4, 2.1, 2.8) if soften_rage else (-3.2, -2.6, -2.0, -1.4, -0.8, 0.0, 0.8, 1.4, 2.0, 2.6, 3.2),
                 vy=3.1,
                 radius=4,
                 color=10,
@@ -687,7 +688,7 @@ def _boss_fire(
                 boss=boss,
                 player_x=player_x,
                 player_y=player_y,
-                ways=5,
+                ways=4 if soften_rage else 5,
                 spread=0.24,
                 speed=4.1,
                 radius=4,
@@ -712,7 +713,7 @@ def _boss_fire(
     if bonus_level >= 2 and pattern == 1:
         _spawn_boss_ring(
             boss=boss,
-            count=8 + (phase * 2),
+            count=(6 + (phase * 2)) if soften_rage else (8 + (phase * 2)),
             speed=2.0 + (phase * 0.2),
             radius=3,
             color=12,
@@ -724,7 +725,7 @@ def _boss_fire(
     if bonus_level >= 3 and pattern == 2:
         _spawn_boss_down_fan(
             boss=boss,
-            vx_values=(-3.6, -2.7, -1.8, -0.9, 0.0, 0.9, 1.8, 2.7, 3.6),
+            vx_values=(-2.7, -1.8, -0.9, 0.0, 0.9, 1.8, 2.7) if soften_rage else (-3.6, -2.7, -1.8, -0.9, 0.0, 0.9, 1.8, 2.7, 3.6),
             vy=3.0 + (phase * 0.12),
             radius=3,
             color=7,

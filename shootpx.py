@@ -75,7 +75,7 @@ class ShootGame:
     BOSS_SPRITE_H = 32
     BOSS_SPRITE_FRAMES = 8
     BOSS_SPRITE_COLKEY = 15
-    BOSS_AURA_CENTER_X_OFFSET = -12
+    BOSS_AURA_CENTER_X_OFFSET = -13
     BOSS_AURA_CENTER_Y_OFFSET = -6
 
     BOSS_TRIGGER_SCORE = 1000
@@ -84,6 +84,7 @@ class ShootGame:
     BOSS_ENTRY_TARGET_Y = PLAY_TOP + 88
     BOSS_MAX_HP = 140
     BOSS_SCORE_VALUE = 1000
+    BOSS_DEFEAT_SEQUENCE_FRAMES = 58
 
     BOMB_RESTOCK_FLASH_FRAMES = 24
 
@@ -110,7 +111,7 @@ class ShootGame:
     TEA_PICKUP_RADIUS = 13
     TEA_FLASH_FRAMES = 22
     TEA_DROP_BONUS_STEP = 0.03
-    WEAPON_ITEM_SWITCH_LOCK_FRAMES = 120
+    WEAPON_ITEM_SWITCH_LOCK_FRAMES = 72
     HEAL_DROP_CANCEL_CHANCE = 0.0025
     WEAPON_OVERDRIVE_CAP = 2
 
@@ -127,6 +128,7 @@ class ShootGame:
     REWARD_CUTIN_SLANT = 28
     REWARD_CUTIN_IN_FRAMES = 10
     REWARD_CUTIN_OUT_FRAMES = 12
+    REWARD_DISSOLVE_FRAMES = 18
 
     PLAYER_SPEED_CAP = 8
     LASER_COOLDOWN_REWARD_STEP = 3
@@ -185,6 +187,7 @@ class ShootGame:
         "sprint": 4,
         "spreader": 5,
         "aimer": 6,
+        "rare": 2,
     }
 
     THEMES = {
@@ -307,6 +310,10 @@ class ShootGame:
         self.boss_hp_trail = 0.0
         self.boss_hp_shake_timer = 0
         self.boss_hp_flash_timer = 0
+        self.boss_defeat_timer = 0
+        self.boss_defeat_x = 0.0
+        self.boss_defeat_y = 0.0
+        self.boss_defeat_scale = 1.0
 
         self.boss_spawn_count = 0
         self.next_boss_kill_threshold = self.BOSS_TRIGGER_KILLS
@@ -319,6 +326,7 @@ class ShootGame:
             family: (self.SHOT_LEVEL_SINGLE if family == start_family else -1)
             for family in self.WEAPON_FAMILY_ORDER
         }
+        self.active_weapon_slots = [start_family]
         self.weapon_overdrive_bonus = {family: 0 for family in self.WEAPON_FAMILY_ORDER}
         self.shot_pick_flash_timer = 0
         self.tea_drop_bonus = 0.0
@@ -331,6 +339,8 @@ class ShootGame:
         self.reward_notice_accent = 10
         self.reward_notice_kind = "reward"
         self.reward_notice_timer = 0
+        self.reward_intro_timer = 0
+        self.reward_pair_preview_index = 0
 
     def _apply_theme(self, theme_name: str) -> None:
         theme = self.THEMES.get(theme_name, self.THEMES["fresh_night"])
@@ -527,6 +537,52 @@ class ShootGame:
         family = family or self.current_weapon_family
         return max(0, min(self.WEAPON_OVERDRIVE_CAP, self.weapon_overdrive_bonus.get(family, 0)))
 
+    def _weapon_level(self, family: str) -> int:
+        return max(self.SHOT_LEVEL_SINGLE, self.weapon_levels.get(family, self.SHOT_LEVEL_SINGLE))
+
+    def _dual_shot_ready(self) -> bool:
+        return len(self.unlocked_weapon_families) >= 2 and any(
+            self.weapon_levels.get(family, -1) >= self.SHOT_LEVEL_MAX
+            for family in self.unlocked_weapon_families
+        )
+
+    def _available_dual_pairs(self) -> list[tuple[str, str]]:
+        unlocked = list(self.unlocked_weapon_families)
+        return [
+            (unlocked[i], unlocked[j])
+            for i in range(len(unlocked))
+            for j in range(i + 1, len(unlocked))
+        ]
+
+    def _sync_active_weapon_slots(self) -> None:
+        if not self._dual_shot_ready():
+            self.active_weapon_slots = [self.current_weapon_family]
+            return
+
+        cleaned: list[str] = []
+        for family in getattr(self, "active_weapon_slots", []):
+            if self._is_weapon_unlocked(family) and family not in cleaned:
+                cleaned.append(family)
+
+        if self.current_weapon_family not in cleaned and self._is_weapon_unlocked(self.current_weapon_family):
+            cleaned.append(self.current_weapon_family)
+
+        for family in self.unlocked_weapon_families:
+            if family not in cleaned:
+                cleaned.append(family)
+
+        self.active_weapon_slots = cleaned[:2]
+        if self.active_weapon_slots:
+            self.current_weapon_family = self.active_weapon_slots[-1]
+
+    def _set_active_weapon_pair(self, pair: tuple[str, str]) -> None:
+        self.active_weapon_slots = [pair[0], pair[1]]
+        self._sync_active_weapon_slots()
+
+    def _active_fire_families(self) -> list[str]:
+        self._sync_active_weapon_slots()
+        return self.active_weapon_slots[:2] if self._dual_shot_ready() else [self.current_weapon_family]
+
     def _is_weapon_unlocked(self, family: str) -> bool:
         return family in self.unlocked_weapon_families
 
@@ -540,6 +596,7 @@ class ShootGame:
             self.weapon_levels[family] = self.SHOT_LEVEL_SINGLE
         if equip_now:
             self.current_weapon_family = family
+        self._sync_active_weapon_slots()
 
     def _next_unlocked_weapon_family(self, family: str) -> str:
         if family not in self.unlocked_weapon_families or len(self.unlocked_weapon_families) <= 1:
@@ -560,13 +617,28 @@ class ShootGame:
         return mapping.get(level, "1WAY")
 
     def _current_shot_cooldown_frames(self) -> int:
-        if self.current_weapon_family != self.WEAPON_FAMILY_BEAM:
-            return self.shoot_interval_frames
+        cooldown = self.shoot_interval_frames
+        for family in self._active_fire_families():
+            if family != self.WEAPON_FAMILY_BEAM:
+                continue
+            level = self._weapon_level(family)
+            beam_cooldown = self.shoot_interval_frames + (8 if level <= self.SHOT_LEVEL_TRIPLE else 10)
+            cooldown = max(cooldown, beam_cooldown)
+        return cooldown
 
-        level = self._current_weapon_level()
-        if level <= self.SHOT_LEVEL_TRIPLE:
-            return self.shoot_interval_frames + 8
-        return self.shoot_interval_frames + 10
+    def _weapon_notice_kind(self, family: str) -> str:
+        return f"weapon_{family}"
+
+    def _notice_palette(self) -> tuple[int, int, int, int]:
+        if self.reward_notice_kind == self._weapon_notice_kind(self.WEAPON_FAMILY_FAN):
+            return 11, 3, 1, 0
+        if self.reward_notice_kind == self._weapon_notice_kind(self.WEAPON_FAMILY_LANCE):
+            return 8, 13, 1, 0
+        if self.reward_notice_kind == self._weapon_notice_kind(self.WEAPON_FAMILY_RAIN):
+            return 12, 5, 1, 0
+        if self.reward_notice_kind == self._weapon_notice_kind(self.WEAPON_FAMILY_BEAM):
+            return 14, 6, 1, 0
+        return 10, 9, 1, 0
 
     def _show_notice(
         self,
@@ -592,20 +664,30 @@ class ShootGame:
                 title=f"{self._weapon_name(family)} UNLOCK",
                 description=f"Now using {self._weapon_name(family)}",
                 accent=self._weapon_accent(family),
-                kind="shot_up",
+                kind=self._weapon_notice_kind(family),
             )
             self.shot_pick_flash_timer = self.TEA_FLASH_FRAMES
             return
 
         previous_family = self.current_weapon_family
         if switch_if_needed and family != self.current_weapon_family:
+            if self._dual_shot_ready():
+                self._sync_active_weapon_slots()
+                if family in self.active_weapon_slots:
+                    keep = [slot for slot in self.active_weapon_slots if slot != family]
+                    self.active_weapon_slots = keep + [family]
+                elif len(self.unlocked_weapon_families) >= 3 and len(self.active_weapon_slots) >= 2:
+                    self.active_weapon_slots = [self.active_weapon_slots[-1], family]
+                else:
+                    self.active_weapon_slots = [self.active_weapon_slots[0], family]
             self.current_weapon_family = family
+            self._sync_active_weapon_slots()
             self._show_notice(
                 label="WEAPON CHANGE",
                 title=f"{self._weapon_name(family)} READY",
                 description=f"Switched from {self._weapon_name(previous_family)}",
                 accent=self._weapon_accent(family),
-                kind="shot_up",
+                kind=self._weapon_notice_kind(family),
             )
             self.shot_pick_flash_timer = self.TEA_FLASH_FRAMES
             return
@@ -621,26 +703,29 @@ class ShootGame:
                     title=f"{self._weapon_name(family)} DRIVE",
                     description=f"ATK +{next_bonus}",
                     accent=self._weapon_accent(family),
-                    kind="shot_up",
+                    kind=self._weapon_notice_kind(family),
                 )
             return
 
         next_level = min(self.weapon_levels.get(family, self.SHOT_LEVEL_SINGLE) + 1, self.SHOT_LEVEL_MAX)
         self._set_weapon_level(family, next_level)
+        self._sync_active_weapon_slots()
         self.shot_pick_flash_timer = self.TEA_FLASH_FRAMES
         self._show_notice(
             label="SHOT UP",
             title=f"{self._weapon_name(family)} BOOST",
             description=f"Now {self._shot_level_name(next_level)}",
             accent=self._weapon_accent(family),
-            kind="shot_up",
+            kind=self._weapon_notice_kind(family),
         )
 
     def _tea_drop_rate(self) -> float:
         return min(0.70, self.TEA_DROP_CHANCE + self.tea_drop_bonus)
 
-    def _next_shot_level_name(self) -> str:
-        next_level = min(self._current_weapon_level() + 1, self.SHOT_LEVEL_MAX)
+    def _next_shot_level_name(self, family: str | None = None) -> str:
+        family = family or self.current_weapon_family
+        current_level = max(self.SHOT_LEVEL_SINGLE, self.weapon_levels.get(family, self.SHOT_LEVEL_SINGLE))
+        next_level = min(current_level + 1, self.SHOT_LEVEL_MAX)
         mapping = {
             self.SHOT_LEVEL_SINGLE: "1WAY",
             self.SHOT_LEVEL_DOUBLE: "2WAY",
@@ -651,13 +736,32 @@ class ShootGame:
         }
         return mapping.get(next_level, "1WAY")
 
+    def _reward_category(self, reward_id: str) -> str:
+        if reward_id.startswith("unlock_") or reward_id.startswith("boost_") or reward_id.startswith("overdrive_"):
+            return "WEAPON"
+        if reward_id in {"max_hp", "repair", "bomb_cap", "bomb_fill"}:
+            return "SURVIVE"
+        return "UTILITY"
+
     def _reward_choice(self, reward_id: str) -> RewardChoice:
-        if reward_id == "weapon_boost":
+        if reward_id.startswith("boost_"):
+            family = reward_id.split("_", 1)[1]
             return RewardChoice(
                 reward_id=reward_id,
-                title=f"{self._weapon_name()} BOOST",
-                description=f"Shot level up to {self._next_shot_level_name()}",
-                accent_color=self._weapon_accent(),
+                title=f"{self._weapon_name(family)} BOOST",
+                description=f"Level up to {self._next_shot_level_name(family)}",
+                accent_color=self._weapon_accent(family),
+                tag="WEAPON",
+            )
+        if reward_id.startswith("overdrive_"):
+            family = reward_id.split("_", 1)[1]
+            next_bonus = min(self._weapon_damage_bonus(family) + 1, self.WEAPON_OVERDRIVE_CAP)
+            return RewardChoice(
+                reward_id=reward_id,
+                title=f"{self._weapon_name(family)} DRIVE",
+                description=f"ATK up to +{next_bonus}",
+                accent_color=self._weapon_accent(family),
+                tag="WEAPON",
             )
         if reward_id.startswith("unlock_"):
             family = reward_id.split("_", 1)[1]
@@ -666,6 +770,7 @@ class ShootGame:
                 title=f"UNLOCK {self._weapon_name(family)}",
                 description=f"Unlock and switch to {self._weapon_name(family)}",
                 accent_color=self._weapon_accent(family),
+                tag="WEAPON",
             )
         if reward_id == "max_hp":
             return RewardChoice(
@@ -673,6 +778,16 @@ class ShootGame:
                 title="MAX HP UP",
                 description="Max HP +1 and heal fully",
                 accent_color=10,
+                tag="SURVIVE",
+            )
+        if reward_id == "repair":
+            heal_amount = min(2, self.player.max_hp - self.player.hp)
+            return RewardChoice(
+                reward_id=reward_id,
+                title="REPAIR",
+                description=f"Recover {heal_amount} HP",
+                accent_color=8,
+                tag="SURVIVE",
             )
         if reward_id == "bomb_cap":
             next_cap = self._bomb_capacity() + 1
@@ -681,6 +796,15 @@ class ShootGame:
                 title="BOMB CAP UP",
                 description=f"Carry up to {next_cap} bombs",
                 accent_color=9,
+                tag="SURVIVE",
+            )
+        if reward_id == "bomb_fill":
+            return RewardChoice(
+                reward_id=reward_id,
+                title="BOMB REFILL",
+                description=f"Refill to {self._bomb_capacity()} bombs",
+                accent_color=10,
+                tag="SURVIVE",
             )
         if reward_id == "move_up":
             next_speed = min(self.PLAYER_SPEED_CAP, self.player.speed_x + 1)
@@ -689,6 +813,7 @@ class ShootGame:
                 title="MOVE UP",
                 description=f"Move faster: speed {next_speed}",
                 accent_color=12,
+                tag="UTILITY",
             )
         if reward_id == "laser_tune":
             next_wait = max(
@@ -700,6 +825,7 @@ class ShootGame:
                 title="LASER TUNE",
                 description=f"Laser reload: {next_wait} frames",
                 accent_color=14,
+                tag="UTILITY",
             )
         if reward_id == "item_rate":
             next_rate = int(round(min(0.70, self._tea_drop_rate() + self.TEA_DROP_BONUS_STEP) * 100))
@@ -708,23 +834,29 @@ class ShootGame:
                 title="ITEM RATE UP",
                 description=f"Weapon item rate: {next_rate}%",
                 accent_color=3,
+                tag="UTILITY",
             )
         return RewardChoice(
             reward_id="max_hp",
             title="MAX HP UP",
             description="Max HP +1 and heal fully",
             accent_color=10,
+            tag="SURVIVE",
         )
 
     def _eligible_reward_ids(self) -> list[str]:
-        reward_ids = [
-            "max_hp",
-            "bomb_cap",
-            "item_rate",
-        ]
+        reward_ids = ["max_hp", "bomb_cap", "item_rate"]
 
-        if self._current_weapon_level() < self.SHOT_LEVEL_MAX:
-            reward_ids.append("weapon_boost")
+        if self.player.hp < self.player.max_hp:
+            reward_ids.append("repair")
+        if self.bomb_stock < self._bomb_capacity():
+            reward_ids.append("bomb_fill")
+
+        for family in self.unlocked_weapon_families:
+            if self.weapon_levels.get(family, self.SHOT_LEVEL_SINGLE) < self.SHOT_LEVEL_MAX:
+                reward_ids.append(f"boost_{family}")
+            elif self._weapon_damage_bonus(family) < self.WEAPON_OVERDRIVE_CAP:
+                reward_ids.append(f"overdrive_{family}")
         for family in self._locked_weapon_families():
             reward_ids.append(f"unlock_{family}")
         if self.player.speed_x < self.PLAYER_SPEED_CAP or self.player.speed_y < self.PLAYER_SPEED_CAP:
@@ -737,9 +869,15 @@ class ShootGame:
     def _reward_weight(self, reward_id: str) -> float:
         loop_depth = max(0, self.boss_spawn_count)
 
-        if reward_id == "weapon_boost":
-            missing_levels = self.SHOT_LEVEL_MAX - self._current_weapon_level()
-            return 2.8 + missing_levels * 1.25 + max(0.0, 1.2 - loop_depth * 0.18)
+        if reward_id.startswith("boost_"):
+            family = reward_id.split("_", 1)[1]
+            missing_levels = self.SHOT_LEVEL_MAX - max(self.SHOT_LEVEL_SINGLE, self.weapon_levels.get(family, self.SHOT_LEVEL_SINGLE))
+            current_bias = 1.0 if family == self.current_weapon_family else 0.25
+            return 2.4 + missing_levels * 1.10 + current_bias + max(0.0, 1.0 - loop_depth * 0.16)
+        if reward_id.startswith("overdrive_"):
+            family = reward_id.split("_", 1)[1]
+            current_bias = 0.9 if family == self.current_weapon_family else 0.2
+            return 1.6 + current_bias + loop_depth * 0.14
         if reward_id.startswith("unlock_"):
             family = reward_id.split("_", 1)[1]
             family_bias = {
@@ -755,8 +893,16 @@ class ShootGame:
             early_survival_bonus = max(0.0, (4 - self.player.max_hp) * 0.75)
             return 1.8 + missing_hp * 2.1 + low_hp_bonus + early_survival_bonus
 
+        if reward_id == "repair":
+            missing_hp = self.player.max_hp - self.player.hp
+            return 1.1 + missing_hp * 1.7 + (2.0 if self.player.hp <= 1 else 0.0)
+
         if reward_id == "bomb_cap":
             return max(0.9, 2.7 - self.bomb_bonus_cap * 0.55 + loop_depth * 0.16)
+
+        if reward_id == "bomb_fill":
+            missing_bombs = self._bomb_capacity() - self.bomb_stock
+            return 0.9 + missing_bombs * 1.3
 
         if reward_id == "move_up":
             speed_gap = self.PLAYER_SPEED_CAP - max(self.player.speed_x, self.player.speed_y)
@@ -803,6 +949,8 @@ class ShootGame:
     def _guaranteed_reward_id(self, reward_ids: list[str]) -> str | None:
         if "max_hp" in reward_ids and self.player.hp <= 1:
             return "max_hp"
+        if "repair" in reward_ids and self.player.hp <= 1:
+            return "repair"
 
         if len(self.unlocked_weapon_families) == 1:
             for family in (self.WEAPON_FAMILY_LANCE, self.WEAPON_FAMILY_RAIN, self.WEAPON_FAMILY_BEAM):
@@ -810,8 +958,9 @@ class ShootGame:
                 if reward_id in reward_ids:
                     return reward_id
 
-        if "weapon_boost" in reward_ids and self._current_weapon_level() <= self.SHOT_LEVEL_TRIPLE and self.boss_spawn_count <= 1:
-            return "weapon_boost"
+        current_boost_id = f"boost_{self.current_weapon_family}"
+        if current_boost_id in reward_ids and self._current_weapon_level() <= self.SHOT_LEVEL_TRIPLE and self.boss_spawn_count <= 1:
+            return current_boost_id
 
         return None
 
@@ -824,11 +973,78 @@ class ShootGame:
             picks.append(guaranteed_id)
             pool.remove(guaranteed_id)
 
+        for category in ("WEAPON", "SURVIVE", "UTILITY"):
+            if len(picks) >= self.REWARD_OPTION_COUNT:
+                break
+            category_ids = [reward_id for reward_id in pool if self._reward_category(reward_id) == category]
+            if not category_ids:
+                continue
+            selected = self._pick_weighted_reward_ids(category_ids, 1)
+            if not selected:
+                continue
+            picks.extend(selected)
+            for reward_id in selected:
+                if reward_id in pool:
+                    pool.remove(reward_id)
+
         remaining = self.REWARD_OPTION_COUNT - len(picks)
         if remaining > 0:
             picks.extend(self._pick_weighted_reward_ids(pool, remaining))
 
         return [self._reward_choice(reward_id) for reward_id in picks[: self.REWARD_OPTION_COUNT]]
+
+    def _sync_reward_pair_preview(self) -> None:
+        pairs = self._available_dual_pairs()
+        if not pairs:
+            self.reward_pair_preview_index = 0
+            return
+
+        self._sync_active_weapon_slots()
+        active = tuple(self.active_weapon_slots[:2])
+        if active in pairs:
+            self.reward_pair_preview_index = pairs.index(active)
+            return
+
+        self.reward_pair_preview_index = min(self.reward_pair_preview_index, len(pairs) - 1)
+        self._set_active_weapon_pair(pairs[self.reward_pair_preview_index])
+
+    def _cycle_reward_pair_preview(self, delta: int) -> None:
+        pairs = self._available_dual_pairs()
+        if not pairs:
+            return
+        self.reward_pair_preview_index = (self.reward_pair_preview_index + delta) % len(pairs)
+        self._set_active_weapon_pair(pairs[self.reward_pair_preview_index])
+
+    def _dual_button_rect(self, index: int) -> tuple[int, int, int, int]:
+        button_w = 60
+        button_h = 24
+        gap = 8
+        total_w = button_w * len(self.WEAPON_FAMILY_ORDER) + gap * (len(self.WEAPON_FAMILY_ORDER) - 1)
+        start_x = (self.WIDTH - total_w) // 2
+        y = self.HEIGHT - 84
+        return start_x + index * (button_w + gap), y, button_w, button_h
+
+    def _select_dual_weapon_button(self, family: str) -> None:
+        if not self._is_weapon_unlocked(family):
+            return
+
+        if not self._dual_shot_ready():
+            self.current_weapon_family = family
+            self.active_weapon_slots = [family]
+            return
+
+        self._sync_active_weapon_slots()
+        slots = [slot for slot in self.active_weapon_slots if self._is_weapon_unlocked(slot)]
+
+        if family in slots:
+            slots = [slot for slot in slots if slot != family] + [family]
+        else:
+            slots.append(family)
+            slots = slots[-2:]
+
+        self.active_weapon_slots = slots
+        self.current_weapon_family = family
+        self._sync_reward_pair_preview()
 
     def _start_reward_selection(self) -> None:
         self.enemies.clear()
@@ -840,11 +1056,25 @@ class ShootGame:
         self.heal_items.clear()
         self.reward_choices = self._build_reward_choices()
         self.reward_selection_index = 0
+        self.reward_intro_timer = self.REWARD_DISSOLVE_FRAMES
+        self._sync_reward_pair_preview()
         self.phase = GamePhase.REWARD_SELECT
 
     def _apply_reward_choice(self, choice: RewardChoice) -> None:
-        if choice.reward_id == "weapon_boost":
-            self._upgrade_weapon_family(self.current_weapon_family, switch_if_needed=False)
+        if choice.reward_id.startswith("boost_"):
+            family = choice.reward_id.split("_", 1)[1]
+            self._upgrade_weapon_family(family, switch_if_needed=False)
+        elif choice.reward_id.startswith("overdrive_"):
+            family = choice.reward_id.split("_", 1)[1]
+            next_bonus = min(self._weapon_damage_bonus(family) + 1, self.WEAPON_OVERDRIVE_CAP)
+            self.weapon_overdrive_bonus[family] = next_bonus
+            self._show_notice(
+                label="MAX POWER",
+                title=f"{self._weapon_name(family)} DRIVE",
+                description=f"ATK +{next_bonus}",
+                accent=self._weapon_accent(family),
+                kind=self._weapon_notice_kind(family),
+            )
         elif choice.reward_id.startswith("unlock_"):
             family = choice.reward_id.split("_", 1)[1]
             self._unlock_weapon_family(family, equip_now=True)
@@ -853,13 +1083,17 @@ class ShootGame:
                 title=f"{self._weapon_name(family)} UNLOCK",
                 description=f"Now using {self._weapon_name(family)}",
                 accent=self._weapon_accent(family),
-                kind="shot_up",
+                kind=self._weapon_notice_kind(family),
             )
         elif choice.reward_id == "max_hp":
             self.player.max_hp += 1
             self.player.hp = self.player.max_hp
+        elif choice.reward_id == "repair":
+            self.player.hp = min(self.player.max_hp, self.player.hp + 2)
         elif choice.reward_id == "bomb_cap":
             self.bomb_bonus_cap += 1
+            self._restock_bombs_full()
+        elif choice.reward_id == "bomb_fill":
             self._restock_bombs_full()
         elif choice.reward_id == "move_up":
             self.player.speed_x = min(self.PLAYER_SPEED_CAP, self.player.speed_x + 1)
@@ -873,7 +1107,11 @@ class ShootGame:
         elif choice.reward_id == "item_rate":
             self.tea_drop_bonus += self.TEA_DROP_BONUS_STEP
 
-        if not choice.reward_id.startswith("unlock_") and choice.reward_id != "weapon_boost":
+        if (
+            not choice.reward_id.startswith("unlock_")
+            and not choice.reward_id.startswith("boost_")
+            and not choice.reward_id.startswith("overdrive_")
+        ):
             self._show_notice(
                 label="REWARD GET",
                 title=choice.title,
@@ -881,6 +1119,7 @@ class ShootGame:
                 accent=choice.accent_color,
                 kind="reward",
             )
+        self._sync_active_weapon_slots()
         self.reward_choices.clear()
         self.reward_selection_index = 0
         self.touch_active = False
@@ -1062,25 +1301,25 @@ class ShootGame:
             self.SHOT_LEVEL_POWER_DOUBLE: (-32.0, -16.0, 0.0, 16.0, 32.0),
             self.SHOT_LEVEL_POWER_TRIPLE: (-40.0, -24.0, -8.0, 8.0, 24.0, 40.0),
         }
-        damage = 1 + bonus
+        damage = 1 + max(0, bonus - 1)
         radius = 2 if level <= self.SHOT_LEVEL_TRIPLE else 3
         style = "rain" if level <= self.SHOT_LEVEL_TRIPLE else "rain_power"
-        growth = 0.13 if level <= self.SHOT_LEVEL_TRIPLE else 0.19
+        growth = 0.12 if level <= self.SHOT_LEVEL_TRIPLE else 0.17
         max_radius = {
-            self.SHOT_LEVEL_SINGLE: 4.0,
-            self.SHOT_LEVEL_DOUBLE: 4.6,
-            self.SHOT_LEVEL_TRIPLE: 5.3,
-            self.SHOT_LEVEL_POWER_SINGLE: 6.1,
-            self.SHOT_LEVEL_POWER_DOUBLE: 7.0,
-            self.SHOT_LEVEL_POWER_TRIPLE: 7.8,
+            self.SHOT_LEVEL_SINGLE: 3.8,
+            self.SHOT_LEVEL_DOUBLE: 4.3,
+            self.SHOT_LEVEL_TRIPLE: 4.9,
+            self.SHOT_LEVEL_POWER_SINGLE: 5.6,
+            self.SHOT_LEVEL_POWER_DOUBLE: 6.4,
+            self.SHOT_LEVEL_POWER_TRIPLE: 7.1,
         }[level]
         max_life = {
-            self.SHOT_LEVEL_SINGLE: 34,
-            self.SHOT_LEVEL_DOUBLE: 34,
-            self.SHOT_LEVEL_TRIPLE: 36,
-            self.SHOT_LEVEL_POWER_SINGLE: 38,
-            self.SHOT_LEVEL_POWER_DOUBLE: 40,
-            self.SHOT_LEVEL_POWER_TRIPLE: 42,
+            self.SHOT_LEVEL_SINGLE: 28,
+            self.SHOT_LEVEL_DOUBLE: 29,
+            self.SHOT_LEVEL_TRIPLE: 31,
+            self.SHOT_LEVEL_POWER_SINGLE: 33,
+            self.SHOT_LEVEL_POWER_DOUBLE: 35,
+            self.SHOT_LEVEL_POWER_TRIPLE: 37,
         }[level]
 
         for idx, xoff in enumerate(patterns[level]):
@@ -1112,7 +1351,7 @@ class ShootGame:
             self.SHOT_LEVEL_POWER_DOUBLE: ((-0.84, -10.0), (0.84, 10.0)),
             self.SHOT_LEVEL_POWER_TRIPLE: ((-1.24, -20.0), (-0.42, -7.0), (0.42, 7.0), (1.24, 20.0)),
         }
-        damage = (2 if level <= self.SHOT_LEVEL_TRIPLE else 3) + bonus
+        damage = (3 if level <= self.SHOT_LEVEL_TRIPLE else 4) + bonus
         radius = 2 if level <= self.SHOT_LEVEL_TRIPLE else 3
         style = "beam_arc" if level <= self.SHOT_LEVEL_TRIPLE else "beam_arc_power"
         life = 78 if level <= self.SHOT_LEVEL_TRIPLE else 88
@@ -1139,20 +1378,24 @@ class ShootGame:
     def _fire_current_shot(self) -> None:
         origin_x = float(self.player.x)
         origin_y = float(self.player.y - self.PLAYER_HALF_H - 6)
-        level = self._current_weapon_level()
-        family = self.current_weapon_family
+        families = self._active_fire_families()
+        dual_offsets = (0.0,) if len(families) == 1 else (-7.0, 7.0)
 
-        if family == self.WEAPON_FAMILY_LANCE:
-            self._fire_lance_shot(origin_x, origin_y, level)
-            return
-        if family == self.WEAPON_FAMILY_RAIN:
-            self._fire_rain_shot(origin_x, origin_y, level)
-            return
-        if family == self.WEAPON_FAMILY_BEAM:
-            self._fire_beam_shot(origin_x, origin_y, level)
-            return
+        for idx, family in enumerate(families):
+            level = self._weapon_level(family)
+            shot_x = origin_x + dual_offsets[idx]
 
-        self._fire_fan_shot(origin_x, origin_y, level)
+            if family == self.WEAPON_FAMILY_LANCE:
+                self._fire_lance_shot(shot_x, origin_y, level)
+                continue
+            if family == self.WEAPON_FAMILY_RAIN:
+                self._fire_rain_shot(shot_x, origin_y, level)
+                continue
+            if family == self.WEAPON_FAMILY_BEAM:
+                self._fire_beam_shot(shot_x, origin_y, level)
+                continue
+
+            self._fire_fan_shot(shot_x, origin_y, level)
 
     def _maybe_spawn_weapon_item(self, x: float, y: float) -> None:
         if random.random() > self._tea_drop_rate():
@@ -1429,6 +1672,34 @@ class ShootGame:
             create_enemy=self._create_enemy,
         )
 
+    def _update_boss_defeat_sequence(self) -> None:
+        if self.boss_defeat_timer <= 0:
+            return
+
+        self.boss_defeat_timer -= 1
+        elapsed = self.BOSS_DEFEAT_SEQUENCE_FRAMES - self.boss_defeat_timer
+
+        if elapsed % 5 == 0:
+            jitter_x = random.uniform(-22.0, 22.0)
+            jitter_y = random.uniform(-16.0, 18.0)
+            self._spawn_enemy_burst(
+                self.boss_defeat_x + jitter_x,
+                self.boss_defeat_y + jitter_y,
+                scale=max(1.4, self.boss_defeat_scale * (0.85 + elapsed * 0.015)),
+            )
+        if elapsed % 3 == 0:
+            self._spawn_enemy_burst(
+                self.boss_defeat_x + random.uniform(-30.0, 30.0),
+                self.boss_defeat_y + random.uniform(-24.0, 24.0),
+                scale=max(0.7, self.boss_defeat_scale * 0.45),
+            )
+
+        if self.boss_defeat_timer <= 0:
+            self.boss_event_started = False
+            self.boss_defeated = True
+            self._advance_boss_progression()
+            self._start_reward_selection()
+
     def _on_boss_defeated(self) -> None:
         if self.boss is None:
             return
@@ -1444,11 +1715,18 @@ class ShootGame:
         self._spawn_enemy_burst(boss.x - 18, boss.y + 6, scale=burst_scale * 0.74)
         self._spawn_enemy_burst(boss.x + 20, boss.y - 8, scale=burst_scale * 0.68)
 
+        self.enemies.clear()
+        self.bullets.clear()
+        self.bombs.clear()
+        self.homing_lasers.clear()
+        self.weapon_items.clear()
+        self.heal_items.clear()
+        self.boss_defeat_timer = self.BOSS_DEFEAT_SEQUENCE_FRAMES
+        self.boss_defeat_x = boss.x
+        self.boss_defeat_y = boss.y
+        self.boss_defeat_scale = boss.display_scale
         self.boss = None
-        self.boss_event_started = False
-        self.boss_defeated = True
-        self._advance_boss_progression()
-        self._start_reward_selection()
+        self.boss_defeated = False
 
     def _laser_origin(self, boss: Boss) -> tuple[float, float]:
         return boss.x, boss.y + 4.0
@@ -1518,6 +1796,10 @@ class ShootGame:
 
         if self.phase == GamePhase.REWARD_SELECT:
             self._update_reward_select_input()
+            return
+
+        if self.boss_defeat_timer > 0:
+            self._update_boss_defeat_sequence()
             return
 
         self._update_player_state()
@@ -1643,10 +1925,16 @@ class ShootGame:
             self.phase = GamePhase.PLAYING
             return
 
+        if self.reward_intro_timer > 0:
+            self.reward_intro_timer -= 1
+
         if pyxel.btnp(pyxel.KEY_LEFT) or pyxel.btnp(pyxel.KEY_UP):
             self.reward_selection_index = (self.reward_selection_index - 1) % len(self.reward_choices)
         elif pyxel.btnp(pyxel.KEY_RIGHT) or pyxel.btnp(pyxel.KEY_DOWN):
             self.reward_selection_index = (self.reward_selection_index + 1) % len(self.reward_choices)
+
+        if self.reward_intro_timer > 6:
+            return
 
         if pyxel.btnp(pyxel.KEY_RETURN) or pyxel.btnp(pyxel.KEY_SPACE):
             self._apply_reward_choice(self.reward_choices[self.reward_selection_index])
@@ -1655,6 +1943,12 @@ class ShootGame:
         if pyxel.btnp(pyxel.MOUSE_BUTTON_LEFT):
             mx = float(pyxel.mouse_x)
             my = float(pyxel.mouse_y)
+            if self._dual_shot_ready():
+                for idx, family in enumerate(self.WEAPON_FAMILY_ORDER):
+                    bx, by, bw, bh = self._dual_button_rect(idx)
+                    if self._point_in_rect(mx, my, bx, by, bw, bh):
+                        self._select_dual_weapon_button(family)
+                        return
             for idx, _choice in enumerate(self.reward_choices):
                 box_y = self.REWARD_BOX_START_Y + idx * (self.REWARD_BOX_H + self.REWARD_BOX_GAP)
                 if self._point_in_rect(mx, my, self.REWARD_BOX_X, box_y, self.REWARD_BOX_W, self.REWARD_BOX_H):
@@ -1776,7 +2070,7 @@ class ShootGame:
         if len(self.homing_lasers) >= self.laser_active_limit:
             return
 
-        laser_speed = 5.2
+        laser_speed = 6.4
         laser_x = float(self.player.x)
         laser_y = float(self.player.y - self.PLAYER_HALF_H - 10)
 
@@ -1804,13 +2098,14 @@ class ShootGame:
             enemy_type=enemy_type,
             enemy_half_h=float(self.ENEMY_HALF_H),
             enemy_half_w=float(self.ENEMY_HALF_W),
+            loop_depth=self.boss_spawn_count,
         )
 
     def _update_spawning(self) -> None:
         self.spawn_timer -= 1
         if self.spawn_timer <= 0:
             spawn_x = float(pyxel.rndi(self.SIDE_MARGIN, self.WIDTH - self.SIDE_MARGIN))
-            enemy_type = pick_enemy_type(self.score)
+            enemy_type = pick_enemy_type(self.score, self.boss_spawn_count)
             self.enemies.append(self._create_enemy(spawn_x, enemy_type))
             self.spawn_timer = int(60 * self.spawn_interval_sec)
 
@@ -2147,6 +2442,8 @@ class ShootGame:
 
                 item.family = self._next_unlocked_weapon_family(item.family)
                 item.bob_phase += math.pi / 2
+                item.vx += bullet.vx * 0.55
+                item.vy = max(-1.2, item.vy - 0.28)
                 item.switch_lock_timer = self.WEAPON_ITEM_SWITCH_LOCK_FRAMES
                 if bullet.piercing:
                     bullet.hit_cooldowns[id(item)] = 8
@@ -2249,7 +2546,26 @@ class ShootGame:
             self.score += enemy.score_value
             self.enemy_kill_count += 1
             self._spawn_enemy_burst(enemy.x, enemy.y, scale=self._enemy_burst_scale_from_enemy(enemy))
-            self._maybe_spawn_weapon_item(enemy.x, enemy.y)
+            if enemy.enemy_type == "rare":
+                self._show_notice(
+                    label="RARE HIT",
+                    title="BONUS TARGET",
+                    description=f"SCORE +{enemy.score_value}",
+                    accent=10,
+                    kind="reward",
+                )
+                self.weapon_items.append(
+                    WeaponItem(
+                        x=enemy.x,
+                        y=enemy.y,
+                        vx=random.uniform(-0.18, 0.18),
+                        vy=self.TEA_FALL_SPEED,
+                        family=random.choice(self.unlocked_weapon_families),
+                        bob_phase=random.uniform(0.0, math.tau),
+                    )
+                )
+            else:
+                self._maybe_spawn_weapon_item(enemy.x, enemy.y)
             if enemy in self.enemies:
                 self.enemies.remove(enemy)
             return
@@ -2446,6 +2762,7 @@ class ShootGame:
         self._draw_bombs()
         self._draw_enemies()
         self._draw_boss()
+        self._draw_boss_defeat_sequence()
         self._draw_enemy_bullets()
         self._draw_weapon_items()
         self._draw_heal_items()
@@ -2951,6 +3268,11 @@ class ShootGame:
         x = int(enemy.x - draw_w / 2)
         y = int(enemy.y - draw_h / 2)
 
+        if enemy.enemy_type == "rare":
+            pulse = 8 if (self.frame_count // 4) % 2 == 0 else 10
+            pyxel.circb(int(enemy.x), int(enemy.y), max(8, int(11 * enemy.display_scale)), pulse)
+            pyxel.circb(int(enemy.x), int(enemy.y), max(10, int(14 * enemy.display_scale)), 7)
+
         pyxel.blt(
             x, y,
             self.ENEMY_SPRITE_BANK,
@@ -2976,7 +3298,8 @@ class ShootGame:
         pyxel.rect(ex, ey, bar_w, bar_h, 1)
         pyxel.rectb(ex - 1, ey - 1, bar_w + 2, bar_h + 2, 5)
         if fill_w > 0:
-            pyxel.rect(ex, ey, fill_w, bar_h, 11)
+            fill_color = 10 if enemy.enemy_type == "rare" else 11
+            pyxel.rect(ex, ey, fill_w, bar_h, fill_color)
 
     def _draw_enemies(self) -> None:
         for enemy in self.enemies:
@@ -3033,6 +3356,33 @@ class ShootGame:
                 pyxel.circb(int(boss.x), int(boss.y), flash_r + 3, 7)
 
         self._draw_boss_hp_bar()
+
+    def _draw_boss_defeat_sequence(self) -> None:
+        if self.boss_defeat_timer <= 0:
+            return
+
+        progress = 1.0 - (self.boss_defeat_timer / self.BOSS_DEFEAT_SEQUENCE_FRAMES)
+        cx = int(self.boss_defeat_x)
+        cy = int(self.boss_defeat_y)
+        flash_r = int(10 + progress * 26 * self.boss_defeat_scale)
+        ring_r = int(18 + progress * 42 * self.boss_defeat_scale)
+        outer_r = int(28 + progress * 64 * self.boss_defeat_scale)
+        pulse = 7 if (self.frame_count // 2) % 2 == 0 else 10
+
+        pyxel.circ(cx, cy, flash_r, pulse)
+        pyxel.circb(cx, cy, ring_r, 10)
+        pyxel.circb(cx, cy, outer_r, 7)
+
+        for spread, color in ((12, 10), (22, 7), (34, 15)):
+            arm = int(spread + progress * 20)
+            pyxel.line(cx - arm, cy, cx + arm, cy, color)
+            pyxel.line(cx, cy - arm, cx, cy + arm, color)
+
+        for idx in range(8):
+            angle = progress * 2.4 + idx * (math.tau / 8)
+            px = int(cx + math.cos(angle) * outer_r)
+            py = int(cy + math.sin(angle) * outer_r * 0.78)
+            pyxel.pset(px, py, 10 if idx % 2 == 0 else 7)
 
     def _draw_boss_hp_bar(self) -> None:
         if self.boss is None and self.boss_hp_trail <= 0:
@@ -3177,7 +3527,9 @@ class ShootGame:
             pyxel.rect(bx, y, block_w, block_h, fill)
             pyxel.rectb(bx, y, block_w, block_h, border)
 
-        pyxel.text(x, y + 13, self._weapon_name(), self._weapon_accent())
+        families = self._active_fire_families()
+        label = self._weapon_name() if len(families) == 1 else f"{self._weapon_name(families[0])}+{self._weapon_name(families[1])}"
+        pyxel.text(x, y + 13, label, self._weapon_accent())
 
     def _draw_reward_notice(self) -> None:
         if self.reward_notice_timer <= 0 or self.phase != GamePhase.PLAYING:
@@ -3197,6 +3549,7 @@ class ShootGame:
         box_x = int(start_x + (target_x - start_x) * eased)
         box_y = self.REWARD_CUTIN_Y
         accent = self.reward_notice_accent
+        panel_main, panel_band, border_dark, title_dark = self._notice_palette()
 
         pulse = (self.frame_count // 3) % 2 == 0
         flash_x = box_x - 40 + ((elapsed * 11) % (panel_w + 96))
@@ -3212,7 +3565,7 @@ class ShootGame:
             0,
         )
 
-        pyxel.rect(box_x, box_y, panel_w - slant, panel_h, 10)
+        pyxel.rect(box_x, box_y, panel_w - slant, panel_h, panel_main)
         pyxel.tri(
             box_x + panel_w - slant,
             box_y,
@@ -3220,10 +3573,10 @@ class ShootGame:
             box_y,
             box_x + panel_w - slant,
             box_y + panel_h,
-            10,
+            panel_main,
         )
 
-        pyxel.rect(box_x, box_y + panel_h - 16, panel_w - slant, 16, 9)
+        pyxel.rect(box_x, box_y + panel_h - 16, panel_w - slant, 16, panel_band)
         pyxel.tri(
             box_x + panel_w - slant,
             box_y + panel_h - 16,
@@ -3231,16 +3584,16 @@ class ShootGame:
             box_y + panel_h - 16,
             box_x + panel_w - slant,
             box_y + panel_h,
-            9,
+            panel_band,
         )
 
         pyxel.line(box_x, box_y, box_x + panel_w - slant, box_y, 7)
-        pyxel.line(box_x, box_y + panel_h - 1, box_x + panel_w - slant, box_y + panel_h - 1, 1)
+        pyxel.line(box_x, box_y + panel_h - 1, box_x + panel_w - slant, box_y + panel_h - 1, border_dark)
         pyxel.line(box_x + panel_w - slant, box_y, box_x + panel_w, box_y, 7)
-        pyxel.line(box_x + panel_w - slant, box_y + panel_h - 1, box_x + panel_w - slant, box_y + panel_h - 1, 1)
-        pyxel.line(box_x, box_y, box_x, box_y + panel_h - 1, 1)
-        pyxel.line(box_x + panel_w - slant, box_y, box_x + panel_w - slant, box_y + panel_h - 1, 1)
-        pyxel.line(box_x + panel_w, box_y, box_x + panel_w - slant, box_y + panel_h - 1, 1)
+        pyxel.line(box_x + panel_w - slant, box_y + panel_h - 1, box_x + panel_w - slant, box_y + panel_h - 1, border_dark)
+        pyxel.line(box_x, box_y, box_x, box_y + panel_h - 1, border_dark)
+        pyxel.line(box_x + panel_w - slant, box_y, box_x + panel_w - slant, box_y + panel_h - 1, border_dark)
+        pyxel.line(box_x + panel_w, box_y, box_x + panel_w - slant, box_y + panel_h - 1, border_dark)
 
         sparkle_points = (
             (82, 14, 7),
@@ -3266,9 +3619,31 @@ class ShootGame:
                 pyxel.pset(px + 1, py + 1, 15)
 
         pyxel.rect(box_x + 8, box_y + 8, 58, 14, 0)
-        pyxel.text(box_x + 14, box_y + 12, self.reward_notice_label, 10)
+        pyxel.text(box_x + 14, box_y + 12, self.reward_notice_label, accent)
 
-        if self.reward_notice_kind == "shot_up":
+        if self.reward_notice_kind.startswith("weapon_"):
+            icon_x = box_x + 17
+            icon_y = box_y + 31
+            family = self.reward_notice_kind.split("_", 1)[1]
+            if family == self.WEAPON_FAMILY_FAN:
+                for idx, spread in enumerate((-7, 0, 7)):
+                    pyxel.line(icon_x + 6, icon_y + 18, icon_x + 20 + spread, icon_y - 6, accent if idx == 1 else 7)
+                pyxel.circ(icon_x + 6, icon_y + 20, 4, 0)
+            elif family == self.WEAPON_FAMILY_LANCE:
+                pyxel.line(icon_x + 8, icon_y + 20, icon_x + 8, icon_y - 8, 7)
+                pyxel.line(icon_x + 12, icon_y + 20, icon_x + 12, icon_y - 12, accent)
+                pyxel.line(icon_x + 16, icon_y + 20, icon_x + 16, icon_y - 8, 7)
+                pyxel.tri(icon_x + 12, icon_y - 16, icon_x + 7, icon_y - 8, icon_x + 17, icon_y - 8, 15)
+            elif family == self.WEAPON_FAMILY_RAIN:
+                for drop_x, drop_y, rad in ((6, -4, 2), (14, 2, 3), (21, -6, 2), (24, 8, 3)):
+                    pyxel.circb(icon_x + drop_x, icon_y + drop_y, rad, 7)
+                    pyxel.pset(icon_x + drop_x, icon_y + drop_y + 1, accent)
+            elif family == self.WEAPON_FAMILY_BEAM:
+                pyxel.line(icon_x + 4, icon_y + 18, icon_x + 16, icon_y - 8, accent)
+                pyxel.line(icon_x + 10, icon_y + 18, icon_x + 22, icon_y - 4, 7)
+                pyxel.line(icon_x + 16, icon_y + 18, icon_x + 28, icon_y - 8, accent)
+                pyxel.pset(icon_x + 16, icon_y - 10, 15)
+        elif self.reward_notice_kind == "shot_up":
             arrow_x = box_x + 20
             arrow_y = box_y + 30
             pyxel.rect(arrow_x + 8, arrow_y + 8, 6, 18, accent)
@@ -3287,7 +3662,7 @@ class ShootGame:
         pyxel.rect(box_x + 44, box_y + 27, 4, 26, 0)
         pyxel.rect(box_x + 50, box_y + 27, 6, 26, accent)
 
-        title_color = 0 if pulse else 1
+        title_color = title_dark if pulse else 1
         draw_big_text(box_x + 64, box_y + 18, self.reward_notice_text, 2, title_color, shadow_color=7)
         draw_big_text(box_x + 64, box_y + 47, self.reward_notice_desc, 1, 0, shadow_color=7)
 
@@ -3352,13 +3727,69 @@ class ShootGame:
 
             title_color = 7 if selected else choice.accent_color
             desc_color = 12 if selected else 7
+            tag_x = box_x + self.REWARD_BOX_W - 82
 
             draw_big_text(box_x + 40, box_y + 18, choice.title, 2, title_color, shadow_color=1)
             draw_big_text(box_x + 40, box_y + 52, choice.description, 1, desc_color, shadow_color=1)
+            pyxel.rect(tag_x, box_y + 10, 68, 14, 1 if selected else 0)
+            pyxel.rectb(tag_x, box_y + 10, 68, 14, choice.accent_color)
+            pyxel.text(tag_x + 10, box_y + 14, choice.tag, 7 if selected else choice.accent_color)
+
+        if self.reward_intro_timer > 0:
+            reveal = 1.0 - (self.reward_intro_timer / self.REWARD_DISSOLVE_FRAMES)
+            mask_x = 24
+            mask_y = self.HUD_H + 24
+            mask_w = self.WIDTH - 48
+            mask_h = self.HEIGHT - self.HUD_H - 60
+            cell = 12
+            for gy in range(mask_y, mask_y + mask_h, cell):
+                for gx in range(mask_x, mask_x + mask_w, cell):
+                    grid_x = (gx - mask_x) // cell
+                    grid_y = (gy - mask_y) // cell
+                    threshold = ((grid_x * 17 + grid_y * 29 + grid_x * grid_y * 3) % 100) / 100.0
+                    if threshold <= reveal:
+                        continue
+                    pyxel.rect(gx, gy, cell, cell, 1)
+
+        if self._dual_shot_ready():
+            title = "CHOOSE DUAL WEAPON"
+            title_x = (self.WIDTH - big_text_width(title, 1)) // 2
+            draw_big_text(title_x, self.HEIGHT - 104, title, 1, 10, shadow_color=1)
+
+            active = set(self._active_fire_families())
+            for idx, family in enumerate(self.WEAPON_FAMILY_ORDER):
+                bx, by, bw, bh = self._dual_button_rect(idx)
+                unlocked = self._is_weapon_unlocked(family)
+                selected = family in active
+                accent = self._weapon_accent(family)
+
+                fill = 1
+                border = 5
+                inner = 0
+                text = 13
+
+                if unlocked:
+                    fill = 0 if not selected else 1
+                    border = accent if not selected else 7
+                    inner = 5 if not selected else accent
+                    text = 5 if not selected else 7
+
+                if selected:
+                    pyxel.rect(bx - 2, by - 2, bw + 4, bh + 4, accent)
+                    pyxel.rectb(bx - 2, by - 2, bw + 4, bh + 4, 7)
+
+                pyxel.rect(bx, by, bw, bh, fill)
+                pyxel.rectb(bx, by, bw, bh, border)
+                pyxel.rectb(bx + 2, by + 2, bw - 4, bh - 4, inner)
+
+                label = self._weapon_name(family) if unlocked else "LOCK"
+                label_x = bx + (bw - big_text_width(label, 1)) // 2
+                draw_big_text(label_x, by + 8, label, 1, text, shadow_color=1)
 
         footer = "ENTER / SPACE TO CONFIRM"
         footer_x = (self.WIDTH - big_text_width(footer, 1)) // 2
-        draw_big_text(footer_x, self.HEIGHT - 30, footer, 1, 10, shadow_color=1)
+        footer_y = self.HEIGHT - 30 if not self._dual_shot_ready() else self.HEIGHT - 42
+        draw_big_text(footer_x, footer_y, footer, 1, 10, shadow_color=1)
 
     def _draw_selector_arrow(self, x: int, y: int, direction: int, color: int) -> None:
         if direction < 0:

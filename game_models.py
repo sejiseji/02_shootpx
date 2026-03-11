@@ -175,3 +175,4 @@ class RewardChoice:
     title: str
     description: str
     accent_color: int = 10
+    tag: str = "UTILITY"

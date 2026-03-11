@@ -10,7 +10,11 @@ from game_models import Enemy
 AppendEnemyBulletFn = Callable[..., bool]
 
 
-def pick_enemy_type(score: int) -> str:
+def pick_enemy_type(score: int, loop_depth: int = 0) -> str:
+    rare_chance = min(0.035, 0.008 + loop_depth * 0.004)
+    if random.random() < rare_chance:
+        return "rare"
+
     enemy_types = [
         "basic",
         "zigzag",
@@ -40,6 +44,7 @@ def pick_enemy_scale(enemy_type: str) -> float:
         "sprint": (1.28, 1.53),
         "spreader": (1.45, 1.87),
         "aimer": (1.53, 2.00),
+        "rare": (1.34, 1.68),
     }
     low, high = ranges.get(enemy_type, (1.45, 1.87))
     return random.uniform(low, high)
@@ -103,6 +108,7 @@ def create_enemy(
     enemy_type: str,
     enemy_half_h: float,
     enemy_half_w: float,
+    loop_depth: int = 0,
 ) -> Enemy:
     move_phase = random.uniform(0.0, math.tau)
     display_scale = pick_enemy_scale(enemy_type)
@@ -173,6 +179,15 @@ def create_enemy(
             display_scale,
         )
 
+    elif enemy_type == "rare":
+        base_vx = random.choice([-1.1, 1.1])
+        base_vy = random.uniform(1.9, 2.7)
+        base_hp = 2
+        base_score = 180
+        shoot_cooldown = random.randrange(9999, 12000)
+        fire_interval = 9999
+        bullet_speed = 0.0
+
     else:
         base_vx = 0.0
         base_vy = random.uniform(1.8, 3.6)
@@ -186,6 +201,26 @@ def create_enemy(
     scaled_vy = scale_enemy_vy(base_vy, display_scale)
     scaled_hp = scale_enemy_hp(base_hp, display_scale)
     scaled_score = scale_enemy_score(base_score, display_scale)
+
+    loop_hp_scale = 1.0 + min(0.70, loop_depth * 0.12)
+    loop_move_scale = 1.0 + min(0.32, loop_depth * 0.05)
+    loop_bullet_scale = 1.0 + min(0.34, loop_depth * 0.06)
+    loop_fire_scale = max(0.68, 1.0 - loop_depth * 0.045)
+
+    scaled_vx *= loop_move_scale
+    scaled_vy *= loop_move_scale
+    scaled_hp = max(1, int(math.ceil(scaled_hp * loop_hp_scale)))
+    scaled_score = max(base_score, int(round(scaled_score * (1.0 + loop_depth * 0.10))))
+    bullet_speed *= loop_bullet_scale
+    if fire_interval < 9999:
+        fire_interval = max(32, int(round(fire_interval * loop_fire_scale)))
+        shoot_cooldown = max(18, int(round(shoot_cooldown * loop_fire_scale)))
+
+    if enemy_type == "rare":
+        scaled_vx *= 1.20
+        scaled_vy *= 1.12
+        scaled_score = max(scaled_score, 220 + loop_depth * 30)
+
     hit_half_w, hit_half_h = build_enemy_hitbox(
         enemy_half_w=enemy_half_w,
         enemy_half_h=enemy_half_h,
@@ -318,6 +353,8 @@ def update_enemies(
             enemy.x += enemy.vx
             if frame_count % 32 == 0:
                 enemy.vx *= -1.0
+        elif enemy.enemy_type == "rare":
+            enemy.x += math.sin((frame_count * 0.16) + enemy.move_phase) * enemy.vx * 0.95
         else:
             enemy.x += enemy.vx
 
