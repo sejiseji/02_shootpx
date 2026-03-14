@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from typing import Any
 
 
 class GamePhase(Enum):
@@ -43,6 +44,7 @@ class EnemyBullet:
     color: int
     damage: int
     display_scale: float
+    slow_inflict: bool = False
     active: bool = True
     age: int = 0
     max_life: int = 180
@@ -64,6 +66,8 @@ class Enemy:
     fire_interval: int = 9999
     bullet_speed: float = 0.0
     move_phase: float = 0.0
+    anim_offset: int = 0
+    anim_dir: int = 1
     score_value: int = 10
     display_scale: float = 1.0
     hit_half_w: float = 8.0
@@ -84,11 +88,13 @@ class Boss:
     shoot_cooldown: int = 60
     fire_interval: int = 42
     pattern_cycle: int = 0
+    anim_dir: int = 1
     was_hit: bool = False
     hit_flash_timer: int = 0
     display_scale: float = 2.0
     hit_half_w: float = 26.0
     hit_half_h: float = 24.0
+    buff_id: str | None = None
     active: bool = True
 
 
@@ -121,6 +127,7 @@ class BombField:
     rotation_speed: float
     damage_interval: int
     damage_timer: int
+    power_level: int = 2
     particle_points: list[complex] = field(default_factory=list)
     active: bool = True
 
@@ -176,3 +183,85 @@ class RewardChoice:
     description: str
     accent_color: int = 10
     tag: str = "UTILITY"
+
+
+@dataclass
+class BossBuffState:
+    current_boss_buff: str | None = None
+    acquired_cycle_buffs: set[str] = field(default_factory=set)
+    overload_active: bool = False
+    overload_timer: int = 0
+    fever_barrier_hits: int = 0
+
+
+@dataclass
+class EchoShot:
+    x: float
+    y: float
+    dx: float
+    dy: float
+    damage: int
+    bounce_left: int
+    lifetime: int
+    length: int
+    split_angle_deg: float = 45.0
+    generation: int = 0
+    power_variant: bool = False
+    active: bool = True
+
+
+@dataclass
+class BombSpark3D:
+    local_x: float
+    local_y: float
+    local_z: float
+    size: int
+    kind: int
+    phase: float
+    layer: int
+
+
+@dataclass
+class PrecomputedParticleFrame:
+    dx: int
+    dy: int
+    color: int
+    size: int
+    kind: int
+
+
+@dataclass
+class PrecomputedBombFrame:
+    particles: list[PrecomputedParticleFrame] = field(default_factory=list)
+    flow_particles: list[PrecomputedParticleFrame] = field(default_factory=list)
+    sheet_x: int = 0
+    sheet_y: int = 0
+    flow_sheet_x: int = 0
+    flow_sheet_y: int = 0
+
+
+@dataclass
+class PrecomputedBombPattern:
+    frames: list[PrecomputedBombFrame] = field(default_factory=list)
+    total_frames: int = 0
+    sheet_image: Any | None = None
+    frame_w: int = 0
+    frame_h: int = 0
+    origin_x: int = 0
+    origin_y: int = 0
+    flow_sheet_image: Any | None = None
+    flow_frame_w: int = 0
+    flow_frame_h: int = 0
+    flow_origin_x: int = 0
+    flow_origin_y: int = 0
+
+
+@dataclass
+class ActiveBombVisual:
+    x: float
+    y: float
+    pattern_id: int
+    scale: float = 1.0
+    frame_index: int = 0
+    age: int = 0
+    alive: bool = True

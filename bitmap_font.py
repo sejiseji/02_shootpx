@@ -5,6 +5,7 @@ import pyxel
 
 BIG_FONT = {
     " ": ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
+    "-": ["00000", "00000", "00000", "11111", "00000", "00000", "00000"],
     "/": ["00001", "00010", "00100", "01000", "10000", "00000", "00000"],
     "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
     "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
@@ -58,6 +59,29 @@ def draw_big_text(
     _draw_big_text_core(x, y, text, scale, color)
 
 
+def draw_scaled_text(
+    x: int,
+    y: int,
+    text: str,
+    scale_x: int,
+    scale_y: int,
+    color: int,
+    shadow_color: int | None = None,
+    advance_x: int | None = None,
+) -> None:
+    if shadow_color is not None:
+        _draw_scaled_text_core(
+            x + max(1, scale_x // 2),
+            y + max(1, scale_y),
+            text,
+            scale_x,
+            scale_y,
+            shadow_color,
+            advance_x,
+        )
+    _draw_scaled_text_core(x, y, text, scale_x, scale_y, color, advance_x)
+
+
 def _draw_big_text_core(x: int, y: int, text: str, scale: int, color: int) -> None:
     cursor_x = x
     for ch in text.upper():
@@ -75,5 +99,75 @@ def _draw_big_text_core(x: int, y: int, text: str, scale: int, color: int) -> No
         cursor_x += 6 * scale
 
 
+def _draw_scaled_text_core(
+    x: int,
+    y: int,
+    text: str,
+    scale_x: int,
+    scale_y: int,
+    color: int,
+    advance_x: int | None = None,
+) -> None:
+    cursor_x = x
+    step_x = advance_x if advance_x is not None else 6 * scale_x
+    for ch in text.upper():
+        glyph = BIG_FONT.get(ch, BIG_FONT[" "])
+        for row_index, row_bits in enumerate(glyph):
+            for col_index, bit in enumerate(row_bits):
+                if bit == "1":
+                    pyxel.rect(
+                        cursor_x + col_index * scale_x,
+                        y + row_index * scale_y,
+                        scale_x,
+                        scale_y,
+                        color,
+                    )
+        cursor_x += step_x
+
+
 def big_text_width(text: str, scale: int) -> int:
     return len(text) * 6 * scale - scale
+
+
+def scaled_text_width(text: str, scale_x: int, advance_x: int | None = None) -> int:
+    step_x = advance_x if advance_x is not None else 6 * scale_x
+    return len(text) * step_x - scale_x
+
+
+HUD_VALUE_COL_X = (0, 2, 4, 6, 8)
+HUD_VALUE_COL_W = (2, 2, 2, 2, 1)
+HUD_VALUE_ROW_Y = (0, 1, 2, 3, 4, 5, 6)
+
+
+def draw_hud_value_text(
+    x: int,
+    y: int,
+    text: str,
+    color: int,
+    shadow_color: int | None = None,
+) -> None:
+    if shadow_color is not None:
+        _draw_hud_value_text_core(x + 1, y + 1, text, shadow_color)
+    _draw_hud_value_text_core(x, y, text, color)
+
+
+def _draw_hud_value_text_core(x: int, y: int, text: str, color: int) -> None:
+    cursor_x = x
+    for ch in text.upper():
+        glyph = BIG_FONT.get(ch, BIG_FONT[" "])
+        for row_index, row_bits in enumerate(glyph):
+            py = y + HUD_VALUE_ROW_Y[row_index]
+            for col_index, bit in enumerate(row_bits):
+                if bit == "1":
+                    pyxel.rect(
+                        cursor_x + HUD_VALUE_COL_X[col_index],
+                        py,
+                        HUD_VALUE_COL_W[col_index],
+                        1,
+                        color,
+                    )
+        cursor_x += 10
+
+
+def hud_value_text_width(text: str) -> int:
+    return len(text) * 10 - 1

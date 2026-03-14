@@ -239,6 +239,8 @@ def create_enemy(
         fire_interval=fire_interval,
         bullet_speed=bullet_speed,
         move_phase=move_phase,
+        anim_offset=random.randrange(0, 8),
+        anim_dir=random.choice((-1, 1)),
         score_value=scaled_score,
         display_scale=display_scale,
         hit_half_w=hit_half_w,

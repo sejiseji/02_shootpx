@@ -96,6 +96,7 @@ def spawn_boss(
         shoot_cooldown=60,
         fire_interval=42,
         pattern_cycle=0,
+        anim_dir=-1 if random.random() < 0.5 else 1,
         display_scale=display_scale,
         hit_half_w=13.0 * display_scale,
         hit_half_h=12.0 * display_scale,
@@ -422,6 +423,7 @@ def _try_start_dash(
     *,
     phase: int,
     spawn_count: int,
+    move_speed_multiplier: float,
     width: int,
     height: int,
     side_margin: int,
@@ -455,7 +457,7 @@ def _try_start_dash(
     dx = target_x - boss.x
     dy = target_y - boss.y
     distance = max(1.0, math.hypot(dx, dy))
-    speed = 8.8 + min(2.2, spawn_count * 0.22)
+    speed = (8.8 + min(2.2, spawn_count * 0.22)) * move_speed_multiplier
 
     boss.dash_target_x = target_x
     boss.dash_target_y = target_y
@@ -472,6 +474,7 @@ def _update_dash_state(
     *,
     phase: int,
     spawn_count: int,
+    move_speed_multiplier: float,
     width: int,
     height: int,
     side_margin: int,
@@ -520,6 +523,7 @@ def _update_dash_state(
         boss,
         phase=phase,
         spawn_count=spawn_count,
+        move_speed_multiplier=move_speed_multiplier,
         width=width,
         height=height,
         side_margin=side_margin,
@@ -538,11 +542,12 @@ def _boss_fire(
     player_y: float,
     append_enemy_bullet: AppendEnemyBullet,
     spawn_count: int,
+    mercy_rage: bool = False,
 ) -> None:
     phase = boss_phase(boss)
     pattern = boss.pattern_cycle % 3
     bonus_level = min(3, spawn_count)
-    soften_rage = spawn_count >= 4 and phase == 3
+    soften_rage = phase == 3 and (spawn_count >= 4 or mercy_rage)
 
     if phase == 1:
         if pattern == 0:
@@ -759,7 +764,9 @@ def update_boss(
     player_x: float,
     player_y: float,
     append_enemy_bullet: AppendEnemyBullet,
+    move_speed_multiplier: float = 1.0,
     spawn_count: int = 0,
+    mercy_rage: bool = False,
     enemies: list[Enemy] | None = None,
     create_enemy: CreateEnemyCallback | None = None,
 ) -> None:
@@ -775,7 +782,7 @@ def update_boss(
         boss.was_hit = False
 
     if not boss.entry_done:
-        boss.y += boss.vy
+        boss.y += boss.vy * move_speed_multiplier
         boss.entry_invulnerable = True
 
         if boss.y >= boss.target_y:
@@ -793,6 +800,7 @@ def update_boss(
         boss,
         phase=phase,
         spawn_count=spawn_count,
+        move_speed_multiplier=move_speed_multiplier,
         width=width,
         height=height,
         side_margin=side_margin,
@@ -807,9 +815,9 @@ def update_boss(
         return
 
     speed_bonus = min(0.75, spawn_count * 0.15)
-    target_speed = {1: 2.0, 2: 2.6, 3: 3.2}[phase] + speed_bonus
+    target_speed = ({1: 2.0, 2: 2.6, 3: 3.2}[phase] + speed_bonus) * move_speed_multiplier
     bob_amp = {1: 7.0, 2: 10.0, 3: 13.0}[phase] + min(5.0, spawn_count * 0.9)
-    bob_speed = {1: 0.05, 2: 0.07, 3: 0.09}[phase] + min(0.03, spawn_count * 0.004)
+    bob_speed = ({1: 0.05, 2: 0.07, 3: 0.09}[phase] + min(0.03, spawn_count * 0.004)) * move_speed_multiplier
     fire_interval = max(
         12,
         {1: 42, 2: 32, 3: 24}[phase] - min(10, spawn_count * 2),
@@ -859,5 +867,6 @@ def update_boss(
             player_y=player_y,
             append_enemy_bullet=append_enemy_bullet,
             spawn_count=spawn_count,
+            mercy_rage=mercy_rage,
         )
         boss.shoot_cooldown = boss.fire_interval
