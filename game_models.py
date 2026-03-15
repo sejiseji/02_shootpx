@@ -300,6 +300,33 @@ class BossDefeatCheer:
 
 
 @dataclass
+class FeverArrivalSushi:
+    start_x: float
+    start_y: float
+    target_x: float
+    target_y: float
+    current_x: float
+    current_y: float
+    enemy_type: str
+    anim_offset: int = 0
+    anim_dir: int = 1
+    display_scale: float = 1.0
+    side: int = 1
+    delay: int = 0
+    bounce_height: float = 0.0
+    bounce_phase: float = 0.0
+
+
+@dataclass
+class FeverArrivalEffect:
+    active: bool = False
+    timer: int = 0
+    center_x: float = 0.0
+    center_y: float = 0.0
+    sushis: list[FeverArrivalSushi] = field(default_factory=list)
+
+
+@dataclass
 class OrbitSushiEntry:
     sushi_type: str
     enemy_type: str

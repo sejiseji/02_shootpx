@@ -403,6 +403,55 @@ class BombLaunchFlashEffect(BaseEffect):
         pyxel.line(cx - diag, cy + diag, cx + diag, cy - diag, 7)
 
 
+class BulletCancelSpriteEffect(BaseEffect):
+    FRAME_COUNT = 8
+    FRAME_HOLD = 2
+    SPRITE_BANK = 0
+    SPRITE_U = 224
+    SPRITE_V = 0
+    SPRITE_SIZE = 16
+    COLKEY = 0
+
+    def __init__(self, x: float, y: float, scale: float = 1.0, layer: int = 11):
+        super().__init__(x=x, y=y, layer=layer, active=True)
+        self.scale = max(0.8, scale)
+        self.frame_index = 0
+        self.frame_timer = 0
+
+    def update(self) -> None:
+        if not self.active:
+            return
+
+        self.frame_timer += 1
+        if self.frame_timer < self.FRAME_HOLD:
+            return
+
+        self.frame_timer = 0
+        self.frame_index += 1
+        if self.frame_index >= self.FRAME_COUNT:
+            self.active = False
+
+    def draw(self) -> None:
+        if not self.active or self.frame_index >= self.FRAME_COUNT:
+            return
+
+        draw_size = self.SPRITE_SIZE * self.scale
+        draw_x = int(round(self.x - draw_size / 2.0))
+        draw_y = int(round(self.y - draw_size / 2.0))
+        pyxel.blt(
+            draw_x,
+            draw_y,
+            self.SPRITE_BANK,
+            self.SPRITE_U,
+            self.SPRITE_V + self.frame_index * self.SPRITE_SIZE,
+            self.SPRITE_SIZE,
+            self.SPRITE_SIZE,
+            self.COLKEY,
+            0.0,
+            self.scale,
+        )
+
+
 class EffectManager:
     def __init__(self, max_effects: int = 72):
         self.effects: list[BaseEffect] = []
@@ -437,6 +486,9 @@ class EffectManager:
 
     def spawn_bomb_launch_flash(self, x: float, y: float, scale: float = 1.0, layer: int = 9) -> None:
         self.add(BombLaunchFlashEffect(x=x, y=y, scale=scale, layer=layer))
+
+    def spawn_bullet_cancel_sprite(self, x: float, y: float, scale: float = 1.0, layer: int = 11) -> None:
+        self.add(BulletCancelSpriteEffect(x=x, y=y, scale=scale, layer=layer))
 
     def update(self) -> None:
         for effect in self.effects:

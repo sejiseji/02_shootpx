@@ -34,6 +34,8 @@ from game_models import (
     Enemy,
     EnemyBullet,
     EchoShot,
+    FeverArrivalEffect,
+    FeverArrivalSushi,
     GamePhase,
     HealItem,
     HomingLaser,
@@ -197,6 +199,12 @@ class ShootGame:
     HOMING_LASER_DROP_BONUS = 0.025
     WEAPON_ITEM_SWITCH_LOCK_FRAMES = 72
     HEAL_DROP_CANCEL_CHANCE = 0.0025
+    HEAL_SPRITE_BANK = 1
+    HEAL_SPRITE_U = 80
+    HEAL_SPRITE_V = 0
+    HEAL_SPRITE_SIZE = 16
+    HEAL_SPRITE_FRAMES = 8
+    HEAL_SPRITE_COLKEY = 0
     WEAPON_OVERDRIVE_CAP = 2
 
     REWARD_OPTION_COUNT = 4
@@ -258,6 +266,39 @@ class ShootGame:
     FEVER_DECOR_OVERFLOW_W = 34
     FEVER_DECOR_PETAL_COUNT = 18
     FEVER_DECOR_CONFETTI_COUNT = 24
+    FEVER_ARRIVAL_FRAMES = 420
+    FEVER_ARRIVAL_GATHER_FRAMES = 96
+    FEVER_ARRIVAL_HOP_FRAMES = 234
+    FEVER_ARRIVAL_SUSHI_COUNT = 72
+    FEVER_ARRIVAL_ALIGNED_COUNT = 36
+    FEVER_ARRIVAL_WAVE_BANK = 0
+    FEVER_ARRIVAL_WAVE_U = 0
+    FEVER_ARRIVAL_WAVE_V = 128
+    FEVER_ARRIVAL_WAVE_W = 216
+    FEVER_ARRIVAL_WAVE_H = 120
+    FEVER_ARRIVAL_WAVE_COLKEY = 0
+    FEVER_ARRIVAL_WAVE_SCALE = 1.38
+    FEVER_ARRIVAL_WAVE_EXTRA_H = 12
+    FEVER_ARRIVAL_WAVE_LOOP_FRAMES = 64
+    FEVER_ARRIVAL_WAVE_LEFT_X = -112
+    FEVER_ARRIVAL_WAVE_OVERFLOW_X = 112
+    FEVER_ARRIVAL_WAVE_Y_PAD = 24
+    FEVER_ARRIVAL_WAVE_ORBIT_X = 11.0
+    FEVER_ARRIVAL_WAVE_ORBIT_Y = 8.0
+    FEVER_ARRIVAL_CHEER_TEXTS = (
+        ("WASSYOI!", -150, -30, 0),
+        ("WASSYOI!", 106, -26, 7),
+        ("PACHIPACHI", -162, 2, 12),
+        ("GANBAE--!!", 126, 6, 18),
+        ("YATTANE!!", -138, 36, 24),
+        ("SAIKOU!", 120, 40, 30),
+        ("PACHIPACHI", -94, 78, 36),
+        ("YATTANE!!", 84, 82, 42),
+        ("WASSYOI!", -28, 104, 48),
+        ("SAIKOU!", 138, 108, 56),
+        ("GANBAE--!!", -158, 112, 64),
+        ("PACHIPACHI", 26, 126, 72),
+    )
     ECHO_SPEED = 8.0
     ECHO_DAMAGE = 8
     ECHO_MAX_BOUNCE = 3
@@ -513,6 +554,11 @@ class ShootGame:
         self.fever_decor_frame_w = 0
         self.fever_decor_frame_h = 0
         self.fever_decor_sheet_cols = 0
+        self.fever_arrival_wave_left_sheet = None
+        self.fever_arrival_wave_right_sheet = None
+        self.fever_arrival_wave_frame_w = 0
+        self.fever_arrival_wave_frame_h = 0
+        self.fever_arrival_wave_sheet_cols = 0
         self.settle_sparkle_back_sheet_image = None
         self.settle_sparkle_front_sheet_image = None
         self.settle_sparkle_frame_w = 0
@@ -520,6 +566,7 @@ class ShootGame:
         self.settle_sparkle_sheet_cols = 0
         self.orbit_enemy_sprite_sheet = None
         self._build_fever_decor_sheet()
+        self._build_fever_arrival_wave_sheet()
         self._build_settle_sparkle_sheet()
         self._build_orbit_enemy_sprite_sheet()
         self.orbit_patterns: list[OrbitPattern] = []
@@ -599,6 +646,8 @@ class ShootGame:
         self.boss_defeat_scale = 1.0
         self.boss_defeat_sushis: list[BossDefeatSushi] = []
         self.boss_defeat_cheers: list[BossDefeatCheer] = []
+        self.fever_arrival_pending = False
+        self.fever_arrival_effect = FeverArrivalEffect()
         self.boss_pattern_id: str | None = None
         self.boss_pattern_transition_timer = 0
         self.boss_pattern_label_timer = 0
@@ -1909,6 +1958,56 @@ class ShootGame:
         self.fever_decor_frame_h = frame_h
         self.fever_decor_sheet_cols = cols
 
+    def _build_fever_arrival_wave_sheet(self) -> None:
+        src = pyxel.image(self.FEVER_ARRIVAL_WAVE_BANK)
+        src_u = self.FEVER_ARRIVAL_WAVE_U
+        src_v = self.FEVER_ARRIVAL_WAVE_V
+        src_w = self.FEVER_ARRIVAL_WAVE_W
+        src_h = self.FEVER_ARRIVAL_WAVE_H
+        scaled_w = max(1, int(round(src_w * self.FEVER_ARRIVAL_WAVE_SCALE)))
+        scaled_h = max(1, int(round(src_h * self.FEVER_ARRIVAL_WAVE_SCALE)) + self.FEVER_ARRIVAL_WAVE_EXTRA_H)
+        orbit_x = int(math.ceil(self.FEVER_ARRIVAL_WAVE_ORBIT_X))
+        orbit_y = int(math.ceil(self.FEVER_ARRIVAL_WAVE_ORBIT_Y))
+        frame_w = scaled_w + orbit_x * 2 + 4
+        frame_h = scaled_h + orbit_y * 2 + 4
+        cols = 4
+        rows = max(1, math.ceil(self.FEVER_ARRIVAL_WAVE_LOOP_FRAMES / cols))
+        left_sheet = pyxel.Image(frame_w * cols, frame_h * rows)
+        right_sheet = pyxel.Image(frame_w * cols, frame_h * rows)
+        left_sheet.cls(0)
+        right_sheet.cls(0)
+
+        for frame_idx in range(self.FEVER_ARRIVAL_WAVE_LOOP_FRAMES):
+            cell_x = (frame_idx % cols) * frame_w
+            cell_y = (frame_idx // cols) * frame_h
+            phase = (frame_idx / max(1, self.FEVER_ARRIVAL_WAVE_LOOP_FRAMES)) * math.tau
+            left_dx = int(round(math.cos(phase) * self.FEVER_ARRIVAL_WAVE_ORBIT_X))
+            left_dy = int(round(math.sin(phase * 1.17) * self.FEVER_ARRIVAL_WAVE_ORBIT_Y))
+            right_dx = int(round(math.cos(-phase + 1.35) * self.FEVER_ARRIVAL_WAVE_ORBIT_X))
+            right_dy = int(round(math.sin(-phase * 1.11 + 0.55) * self.FEVER_ARRIVAL_WAVE_ORBIT_Y))
+            left_x0 = cell_x + orbit_x + 2 + left_dx
+            left_y0 = cell_y + orbit_y + 2 + left_dy
+            right_x0 = cell_x + orbit_x + 2 + right_dx
+            right_y0 = cell_y + orbit_y + 2 + right_dy
+
+            for sy in range(scaled_h):
+                sample_y = min(src_h - 1, int((sy + 0.5) * src_h / scaled_h))
+                for sx in range(scaled_w):
+                    sample_x = min(src_w - 1, int((sx + 0.5) * src_w / scaled_w))
+                    color_left = src.pget(src_u + sample_x, src_v + sample_y)
+                    if color_left != self.FEVER_ARRIVAL_WAVE_COLKEY:
+                        left_sheet.pset(left_x0 + sx, left_y0 + sy, color_left)
+                    mirror_x = src_w - 1 - sample_x
+                    color_right = src.pget(src_u + mirror_x, src_v + sample_y)
+                    if color_right != self.FEVER_ARRIVAL_WAVE_COLKEY:
+                        right_sheet.pset(right_x0 + sx, right_y0 + sy, color_right)
+
+        self.fever_arrival_wave_left_sheet = left_sheet
+        self.fever_arrival_wave_right_sheet = right_sheet
+        self.fever_arrival_wave_frame_w = frame_w
+        self.fever_arrival_wave_frame_h = frame_h
+        self.fever_arrival_wave_sheet_cols = cols
+
     def choose_next_boss_buff(self, acquired_cycle_buffs: set[str]) -> str:
         remaining = [buff_id for buff_id in self.BUFF_IDS if buff_id not in acquired_cycle_buffs]
         if not remaining:
@@ -1956,14 +2055,8 @@ class ShootGame:
         self.boss_buff_state.overload_active = True
         self.boss_buff_state.overload_timer = 0
         self.boss_buff_state.fever_barrier_hits = 2
+        self.fever_arrival_pending = True
         self.audio.play_se("weapon_level_up")
-        self._show_notice(
-            label="FEVER TIME",
-            title="ALL BUFFS ONLINE",
-            description="x2 buffs + 2-hit barrier",
-            accent=10,
-            kind="overload",
-        )
 
     def update_overload(self) -> None:
         return
@@ -3248,6 +3341,8 @@ class ShootGame:
         self.heal_items.clear()
         self.boss_defeat_sushis.clear()
         self.boss_defeat_cheers.clear()
+        self.fever_arrival_effect = FeverArrivalEffect()
+        self.fever_arrival_pending = False
         self._clear_boss_pattern_state()
         self.reward_choices = self._build_reward_choices()
         self.reward_selection_index = 0
@@ -3853,6 +3948,9 @@ class ShootGame:
     def _spawn_hit_spark(self, x: float, y: float, scale: float = 1.0) -> None:
         self.effects.spawn_hit_spark(x=x, y=y, scale=scale, layer=11)
 
+    def _spawn_bullet_cancel_sprite(self, x: float, y: float, scale: float = 1.0) -> None:
+        self.effects.spawn_bullet_cancel_sprite(x=x, y=y, scale=scale, layer=11)
+
     def _spawn_laser_impact(self, x: float, y: float, vx: float, vy: float, scale: float = 1.0) -> None:
         self.effects.spawn_laser_impact(x=x, y=y, vx=vx, vy=vy, scale=scale, layer=12)
 
@@ -4066,7 +4164,10 @@ class ShootGame:
             self.boss_defeat_sushis.clear()
             self.boss_defeat_cheers.clear()
             self._advance_boss_progression()
-            self._start_reward_selection()
+            if self.fever_arrival_pending:
+                self._start_fever_arrival_effect()
+            else:
+                self._start_reward_selection()
 
     def _on_boss_defeated(self) -> None:
         if self.boss is None:
@@ -4103,6 +4204,88 @@ class ShootGame:
         self._spawn_boss_defeat_cheers(boss.x, boss.y, boss.display_scale)
         self.boss = None
         self.boss_defeated = False
+
+    def _start_fever_arrival_effect(self) -> None:
+        rng = random.Random(self.frame_count * 131 + self.enemy_kill_count * 17)
+        center_x = self.WIDTH * 0.5
+        center_y = self.PLAY_TOP + 226
+        self.reward_notice_timer = 0
+        sushis: list[FeverArrivalSushi] = []
+        cols = 7
+        row_gap = 24
+        col_gap = 24
+        aligned_count = min(self.FEVER_ARRIVAL_ALIGNED_COUNT, self.FEVER_ARRIVAL_SUSHI_COUNT)
+        for idx in range(self.FEVER_ARRIVAL_SUSHI_COUNT):
+            if idx < aligned_count:
+                row = idx // cols
+                col = idx % cols
+                target_x = center_x + (col - (cols - 1) / 2) * col_gap + rng.uniform(-4.0, 4.0)
+                target_y = center_y + (row - 1.5) * row_gap + rng.uniform(-3.0, 3.0)
+            else:
+                extra_idx = idx - aligned_count
+                extra_count = max(1, self.FEVER_ARRIVAL_SUSHI_COUNT - aligned_count)
+                angle = (extra_idx / extra_count) * math.tau + rng.uniform(-0.22, 0.22)
+                radius_x = 104.0 + rng.uniform(-18.0, 18.0)
+                radius_y = 62.0 + rng.uniform(-14.0, 14.0)
+                target_x = center_x + math.cos(angle) * radius_x
+                target_y = center_y + math.sin(angle) * radius_y + rng.uniform(-6.0, 6.0) + 8.0
+            side = -1 if idx % 2 == 0 else 1
+            start_x = -26.0 - rng.uniform(0.0, 34.0) if side < 0 else self.WIDTH + 26.0 + rng.uniform(0.0, 34.0)
+            start_y = center_y + rng.uniform(-72.0, 72.0)
+            sushis.append(
+                FeverArrivalSushi(
+                    start_x=start_x,
+                    start_y=start_y,
+                    target_x=target_x,
+                    target_y=target_y,
+                    current_x=start_x,
+                    current_y=start_y,
+                    enemy_type=rng.choice(self.ORBIT_SPRITE_TYPES),
+                    anim_offset=rng.randrange(0, self.ENEMY_SPRITE_FRAMES),
+                    anim_dir=rng.choice((-1, 1)),
+                    display_scale=rng.uniform(0.84, 1.16),
+                    side=side,
+                    delay=(idx % 18) * 4 + rng.randrange(0, 5),
+                    bounce_height=rng.uniform(4.0, 11.0),
+                    bounce_phase=rng.uniform(0.0, math.tau),
+                )
+            )
+        self.fever_arrival_effect = FeverArrivalEffect(
+            active=True,
+            timer=0,
+            center_x=center_x,
+            center_y=center_y,
+            sushis=sushis,
+        )
+        self.audio.play_se("weapon_level_up")
+
+    def _update_fever_arrival_effect(self) -> None:
+        effect = self.fever_arrival_effect
+        if not effect.active:
+            return
+        effect.timer += 1
+
+        gather_frames = self.FEVER_ARRIVAL_GATHER_FRAMES
+        hop_frames = self.FEVER_ARRIVAL_HOP_FRAMES
+        for sushi in effect.sushis:
+            local_timer = max(0, effect.timer - sushi.delay)
+            if local_timer < gather_frames:
+                t = min(1.0, local_timer / max(1, gather_frames))
+                u = 1.0 - (1.0 - t) * (1.0 - t)
+                sushi.current_x = sushi.start_x + (sushi.target_x - sushi.start_x) * u
+                sushi.current_y = sushi.start_y + (sushi.target_y - sushi.start_y) * u
+            else:
+                hop_elapsed = local_timer - gather_frames
+                hop_u = min(1.0, hop_elapsed / max(1, hop_frames))
+                hop_wave = abs(math.sin(hop_u * math.tau * 4.0 + sushi.bounce_phase))
+                hover = math.sin(hop_u * math.tau * 0.8 + sushi.bounce_phase) * 1.5
+                sushi.current_x = sushi.target_x
+                sushi.current_y = sushi.target_y - hop_wave * sushi.bounce_height + hover
+
+        if effect.timer >= self.FEVER_ARRIVAL_FRAMES:
+            effect.active = False
+            self.fever_arrival_pending = False
+            self._start_reward_selection()
 
     def _spawn_boss_defeat_sushi_burst(self, x: float, y: float, boss_scale: float) -> None:
         rng = random.Random(self.frame_count * 97 + int(x * 3) + int(y * 5))
@@ -4326,6 +4509,10 @@ class ShootGame:
 
         if self.boss_defeat_timer > 0 or self.boss_defeat_confetti_timer > 0:
             self._update_boss_defeat_sequence()
+            return
+
+        if self.fever_arrival_effect.active:
+            self._update_fever_arrival_effect()
             return
 
         self._update_player_state()
@@ -5178,6 +5365,11 @@ class ShootGame:
         for enemy_bullet in self.enemy_bullets:
             if self._circles_overlap(x, y, radius, enemy_bullet.x, enemy_bullet.y, enemy_bullet.radius):
                 self._maybe_spawn_heal_item(enemy_bullet.x, enemy_bullet.y)
+                self._spawn_bullet_cancel_sprite(
+                    enemy_bullet.x,
+                    enemy_bullet.y,
+                    scale=max(0.85, enemy_bullet.display_scale * 1.05),
+                )
                 removed += 1
                 continue
             remaining.append(enemy_bullet)
@@ -5220,6 +5412,11 @@ class ShootGame:
             for enemy_bullet in self.enemy_bullets[:]:
                 if self._laser_hits_enemy_bullet(laser, enemy_bullet):
                     self._maybe_spawn_heal_item(enemy_bullet.x, enemy_bullet.y)
+                    self._spawn_bullet_cancel_sprite(
+                        enemy_bullet.x,
+                        enemy_bullet.y,
+                        scale=max(0.9, enemy_bullet.display_scale * 1.1),
+                    )
                     if enemy_bullet in self.enemy_bullets:
                         self.enemy_bullets.remove(enemy_bullet)
                     self._force_homing_laser_redirect(laser)
@@ -5351,6 +5548,11 @@ class ShootGame:
                 hit_r = enemy_bullet.radius + 4.5
                 if self._point_segment_distance_sq(enemy_bullet.x, enemy_bullet.y, x0, y0, x1, y1) <= hit_r * hit_r:
                     self._maybe_spawn_heal_item(enemy_bullet.x, enemy_bullet.y)
+                    self._spawn_bullet_cancel_sprite(
+                        enemy_bullet.x,
+                        enemy_bullet.y,
+                        scale=max(0.9, enemy_bullet.display_scale * 1.08),
+                    )
                     canceled = True
                     break
             if not canceled:
@@ -5707,6 +5909,7 @@ class ShootGame:
         self._draw_effects()
         self._draw_player_orbit_layer()
         self._draw_sushi_settle_message()
+        self._draw_fever_arrival_effect()
         self._draw_boss_pattern_label()
         self._draw_hud()
         self._draw_reward_notice()
@@ -5734,6 +5937,8 @@ class ShootGame:
 
     def _draw_fever_side_decor(self) -> None:
         if not self._fever_active():
+            return
+        if self.fever_arrival_effect.active:
             return
         if self.phase != GamePhase.PLAYING:
             return
@@ -6681,15 +6886,19 @@ class ShootGame:
 
     def _draw_heal_items(self) -> None:
         for item in self.heal_items:
-            ix = int(item.x)
-            iy = int(item.y)
-
-            pyxel.circ(ix, iy, 7, 13)
-            pyxel.circb(ix, iy, 7, 7)
-            pyxel.circ(ix - 2, iy - 1, 3, 8)
-            pyxel.circ(ix + 2, iy - 1, 3, 8)
-            pyxel.tri(ix - 6, iy, ix + 6, iy, ix, iy + 7, 8)
-            pyxel.pset(ix, iy + 2, 7)
+            frame = ((self.frame_count // 2) + int(item.bob_phase * 3.0)) % self.HEAL_SPRITE_FRAMES
+            draw_x = int(round(item.x - self.HEAL_SPRITE_SIZE / 2))
+            draw_y = int(round(item.y - self.HEAL_SPRITE_SIZE / 2))
+            pyxel.blt(
+                draw_x,
+                draw_y,
+                self.HEAL_SPRITE_BANK,
+                self.HEAL_SPRITE_U,
+                self.HEAL_SPRITE_V + frame * self.HEAL_SPRITE_SIZE,
+                self.HEAL_SPRITE_SIZE,
+                self.HEAL_SPRITE_SIZE,
+                self.HEAL_SPRITE_COLKEY,
+            )
 
     def _draw_bombs(self) -> None:
         for bomb in self.bombs:
@@ -7120,6 +7329,96 @@ class ShootGame:
                     pulse_color,
                     shadow_color=cheer.shadow_color,
                 )
+
+    def _draw_fever_arrival_effect(self) -> None:
+        effect = self.fever_arrival_effect
+        if not effect.active or not effect.sushis:
+            return
+
+        center_x = int(round(effect.center_x))
+        center_y = int(round(effect.center_y))
+        gather_done = effect.timer >= self.FEVER_ARRIVAL_GATHER_FRAMES
+        pulse_color = 10 if (self.frame_count // 4) % 2 == 0 else 15
+        sub_color = 7 if (self.frame_count // 6) % 2 == 0 else 12
+
+        self._draw_fever_arrival_waves(effect)
+
+        for sushi in sorted(effect.sushis, key=lambda item: item.current_y):
+            self._draw_orbit_enemy_sprite(
+                sushi.current_x,
+                sushi.current_y,
+                enemy_type=sushi.enemy_type,
+                anim_offset=sushi.anim_offset,
+                anim_dir=sushi.anim_dir,
+                scale=sushi.display_scale,
+            )
+            if gather_done and (self.frame_count + sushi.delay) % 8 < 4:
+                pyxel.pset(int(round(sushi.current_x)), int(round(sushi.current_y - 10)), 15)
+
+        self._draw_fever_arrival_cheers(effect, center_x, center_y)
+
+        if effect.timer >= self.FEVER_ARRIVAL_GATHER_FRAMES // 2:
+            main_text = "ALL 5 BUFFS ABSORBED"
+            sub_text = "FEVER TIME START!!"
+            main_w = big_text_width(main_text, 2)
+            sub_w = big_text_width(sub_text, 2)
+            draw_big_text(center_x - main_w // 2, center_y - 108, main_text, 2, pulse_color, shadow_color=1)
+            if (self.frame_count // 2) % 2 == 0:
+                draw_big_text(center_x - sub_w // 2, center_y - 82, sub_text, 2, sub_color, shadow_color=1)
+
+    def _draw_fever_arrival_waves(self, effect: FeverArrivalEffect) -> None:
+        if (
+            self.fever_arrival_wave_left_sheet is None
+            or self.fever_arrival_wave_right_sheet is None
+            or self.fever_arrival_wave_frame_w <= 0
+            or self.fever_arrival_wave_frame_h <= 0
+        ):
+            return
+        frame_idx = effect.timer % self.FEVER_ARRIVAL_WAVE_LOOP_FRAMES
+        cols = max(1, self.fever_arrival_wave_sheet_cols)
+        cell_x = (frame_idx % cols) * self.fever_arrival_wave_frame_w
+        cell_y = (frame_idx // cols) * self.fever_arrival_wave_frame_h
+        draw_y = self.HEIGHT - self.fever_arrival_wave_frame_h + self.FEVER_ARRIVAL_WAVE_Y_PAD
+        right_x = self.WIDTH - self.fever_arrival_wave_frame_w + self.FEVER_ARRIVAL_WAVE_OVERFLOW_X
+
+        pyxel.blt(
+            self.FEVER_ARRIVAL_WAVE_LEFT_X,
+            draw_y,
+            self.fever_arrival_wave_left_sheet,
+            cell_x,
+            cell_y,
+            self.fever_arrival_wave_frame_w,
+            self.fever_arrival_wave_frame_h,
+            0,
+        )
+        pyxel.blt(
+            right_x,
+            draw_y,
+            self.fever_arrival_wave_right_sheet,
+            cell_x,
+            cell_y,
+            self.fever_arrival_wave_frame_w,
+            self.fever_arrival_wave_frame_h,
+            0,
+        )
+
+    def _draw_fever_arrival_cheers(self, effect: FeverArrivalEffect, center_x: int, center_y: int) -> None:
+        if effect.timer < self.FEVER_ARRIVAL_GATHER_FRAMES // 3:
+            return
+
+        for idx, (text, dx, dy, delay) in enumerate(self.FEVER_ARRIVAL_CHEER_TEXTS):
+            if effect.timer < delay:
+                continue
+            local_timer = effect.timer - delay
+            cycle = local_timer % 96
+            if cycle >= 68:
+                continue
+
+            x = center_x + dx
+            y = center_y + dy + int(math.sin((local_timer + idx * 3) * 0.12) * 2.0)
+            color = 10 if (cycle // 4) % 2 == 0 else 15
+            pyxel.text(x, y, text, color)
+            pyxel.text(x + 1, y, text, 1)
 
     def _draw_boss_hp_bar(self) -> None:
         if self.boss is None and self.boss_hp_trail <= 0:
