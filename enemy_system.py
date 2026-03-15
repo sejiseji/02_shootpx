@@ -10,6 +10,18 @@ from game_models import Enemy
 AppendEnemyBulletFn = Callable[..., bool]
 
 
+ENEMY_SUSHI_TYPE = {
+    "basic": "tuna",
+    "zigzag": "salmon",
+    "shooter": "egg",
+    "tank": "shrimp",
+    "sprint": "tuna",
+    "spreader": "gunkan",
+    "aimer": "salmon",
+    "rare": "gunkan",
+}
+
+
 def pick_enemy_type(score: int, loop_depth: int = 0) -> str:
     rare_chance = min(0.035, 0.008 + loop_depth * 0.004)
     if random.random() < rare_chance:
@@ -245,6 +257,7 @@ def create_enemy(
         display_scale=display_scale,
         hit_half_w=hit_half_w,
         hit_half_h=hit_half_h,
+        sushi_type=ENEMY_SUSHI_TYPE.get(enemy_type, "tuna"),
     )
 
 

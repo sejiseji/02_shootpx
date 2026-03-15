@@ -72,6 +72,7 @@ class Enemy:
     display_scale: float = 1.0
     hit_half_w: float = 8.0
     hit_half_h: float = 8.0
+    sushi_type: str = "tuna"
     active: bool = True
 
 
@@ -265,3 +266,110 @@ class ActiveBombVisual:
     frame_index: int = 0
     age: int = 0
     alive: bool = True
+
+
+@dataclass
+class BossDefeatSushi:
+    x: float
+    y: float
+    vx: float
+    vy: float
+    enemy_type: str
+    anim_offset: int = 0
+    anim_dir: int = 1
+    scale: float = 1.0
+    depth: float = 0.0
+    delay: int = 0
+    life: int = 0
+    active: bool = True
+
+
+@dataclass
+class BossDefeatCheer:
+    x: float
+    y: float
+    vx: float
+    vy: float
+    text: str
+    color: int = 15
+    shadow_color: int = 1
+    scale: int = 1
+    delay: int = 0
+    life: int = 0
+    active: bool = True
+
+
+@dataclass
+class OrbitSushiEntry:
+    sushi_type: str
+    enemy_type: str
+    acquire_order: int
+    anim_offset: int = 0
+    anim_dir: int = 1
+    display_scale: float = 1.0
+
+
+@dataclass
+class OrbitSample:
+    dx: int
+    dy: int
+    depth: float
+    scale: float
+    brightness_rank: int
+
+
+@dataclass
+class OrbitPattern:
+    samples: list[OrbitSample] = field(default_factory=list)
+    rotation_frames: list[list[OrbitSample]] = field(default_factory=list)
+    shell_rotation_frames: list[list[OrbitSample]] = field(default_factory=list)
+    length: int = 0
+    rotation_length: int = 0
+    name: str = "orbit"
+
+
+@dataclass
+class SettlingSushi:
+    sushi_type: str
+    enemy_type: str
+    start_x: float
+    start_y: float
+    target_x: float
+    target_y: float
+    current_x: float
+    current_y: float
+    circle_angle: float
+    anim_offset: int = 0
+    anim_dir: int = 1
+    display_scale: float = 1.0
+    jump_delay: int = 0
+    jump_timer: int = 0
+    shake_timer: int = 0
+    offset_x: float = 0.0
+    offset_y: float = 0.0
+    explode_vx: float = 0.0
+    explode_vy: float = 0.0
+    done: bool = False
+
+
+@dataclass
+class SushiSettleEffect:
+    active: bool = False
+    phase: int = 0
+    timer: int = 0
+    sushis: list[SettlingSushi] | None = None
+    gained_score: int = 0
+    gained_barrier: int = 1
+    center_x: float = 0.0
+    center_y: float = 0.0
+    score_applied: bool = False
+
+
+@dataclass
+class DrawItem:
+    layer_group: int
+    depth: float
+    kind: str
+    x: float
+    y: float
+    payload: Any = None

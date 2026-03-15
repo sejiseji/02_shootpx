@@ -11,7 +11,9 @@ from bitmap_font import (
     big_text_width,
     draw_big_text,
     draw_hud_value_text,
+    draw_scaled_text,
     hud_value_text_width,
+    scaled_text_width,
 )
 from boss_system import boss_phase, spawn_boss, update_boss
 from effects import EffectManager
@@ -24,22 +26,30 @@ from game_models import (
     BombSpark3D,
     BombField,
     Boss,
+    BossDefeatCheer,
+    BossDefeatSushi,
     BossBuffState,
     Bullet,
+    DrawItem,
     Enemy,
     EnemyBullet,
     EchoShot,
     GamePhase,
     HealItem,
     HomingLaser,
+    OrbitPattern,
+    OrbitSample,
+    OrbitSushiEntry,
     PrecomputedBombFrame,
     PrecomputedBombPattern,
     PrecomputedParticleFrame,
     Player,
     RewardChoice,
+    SettlingSushi,
+    SushiSettleEffect,
     WeaponItem,
 )
-from quaternion_utils import quaternion_from_axis_angle, rotate_vector_by_quaternion
+from quaternion_utils import normalize_vector, quaternion_from_axis_angle, rotate_vector_by_quaternion
 
 
 class ShootGame:
@@ -55,6 +65,7 @@ class ShootGame:
     PLAYER_H = 16
     PLAYER_HALF_W = PLAYER_W // 2
     PLAYER_HALF_H = PLAYER_H // 2
+    PLAYER_EDGE_OVERHANG_X = PLAYER_W // 3
 
     ENEMY_W = 16
     ENEMY_H = 16
@@ -82,6 +93,20 @@ class ShootGame:
     ENEMY_SPRITE_SIZE = 16
     ENEMY_SPRITE_FRAMES = 8
     ENEMY_SPRITE_COLKEY = 11
+    SETTLE_SPARKLE_BANK = 0
+    SETTLE_SPARKLE_U = 112
+    SETTLE_SPARKLE_V = 32
+    SETTLE_SPARKLE_SIZE = 16
+    SETTLE_SPARKLE_FRAMES = 4
+    SETTLE_SPARKLE_COLKEY = 11
+    SETTLE_SPARKLE_COUNT = 10
+    SETTLE_SPARKLE_LARGE_COUNT_PER_LAYER = 2
+    ORBIT_SPRITE_SIZE = 16
+    ORBIT_SHELL_SPARKLE_SCALE = 0.375
+    ORBIT_SHELL_SPARKLE_SLOT_COUNT = 18
+    ORBIT_SHELL_SPARKLE_DRAW_OFFSET = 4.0
+    ORBIT_SHELL_SPARKLE_DRAW_X_OFFSET = -5.0
+    ORBIT_SHELL_SPARKLE_DRAW_Y_OFFSET = -5.0
 
     BOSS_SPRITE_BANK = 1
     BOSS_SPRITE_U = 144
@@ -99,7 +124,7 @@ class ShootGame:
     BOSS_TRIGGER_SCORE = 1000
     BOSS_TRIGGER_KILLS = 40
     BOSS_WARNING_TIME = 90
-    BOSS_ENTRY_TARGET_Y = PLAY_TOP + 88
+    BOSS_ENTRY_TARGET_Y = PLAY_TOP + 104
     BOSS_MAX_HP = 140
     BOSS_SCORE_VALUE = 1000
     BOSS_DAMAGE_COOLDOWN_FRAMES = 2
@@ -108,6 +133,21 @@ class ShootGame:
     BOSS_PATTERN_LABEL_FRAMES = 84
     BOSS_PATTERN_CONFETTI_FRAMES = 104
     BOSS_DEFEAT_CONFETTI_FRAMES = 118
+    BOSS_DEFEAT_SUSHI_COUNT = 122
+    BOSS_DEFEAT_CHEER_TEXTS = (
+        "ARIGATO!!",
+        "ARIGATO!!",
+        "ARIGATO!!",
+        "DAISUKI!!",
+        "YATTA---!!",
+        "HYAHHO--!!",
+        "TASUKATTA!!",
+        "WEEEEEI!!",
+        "HYAHHO--!!",
+        "TASUKATTA!!",
+        "THANK YOU!!",
+    )
+    BOSS_DEFEAT_CHEER_COUNT = 14
     SEIGAIHA_DAMAGE_TAKEN_MULT = 0.88
     ASANOHA_HP_MULT = 1.15
     YAGASURI_MOVE_SPEED_MULT = 1.15
@@ -115,7 +155,9 @@ class ShootGame:
     KARAKUSA_SLOW_FRAMES = 30
     SHIPPO_SIZE_SCALES = (0.82, 1.0, 1.22)
     START_DEBUG_BOMB_POWER_MENU = False
+    START_DEBUG_LASER_COUNT_MENU = False
     START_DEBUG_FEVER_MENU = False
+    START_DEBUG_PREFEVER_MENU = False
     START_DEBUG_BOSS_PATTERN_MENU = False
     START_DEBUG_SUB_WEAPON_MENU = False
     DESKTOP_DEBUG_MOBILE_CONTROLS = False
@@ -146,7 +188,7 @@ class ShootGame:
     MOBILE_BUTTON_H = 24
     MOBILE_BUTTON_GAP = 8
 
-    TEA_DROP_CHANCE = 0.06
+    TEA_DROP_CHANCE = 0.07
     TEA_FALL_SPEED = 1.35
     TEA_BOB_SPEED = 0.10
     TEA_PICKUP_RADIUS = 13
@@ -157,10 +199,10 @@ class ShootGame:
     HEAL_DROP_CANCEL_CHANCE = 0.0025
     WEAPON_OVERDRIVE_CAP = 2
 
-    REWARD_OPTION_COUNT = 3
+    REWARD_OPTION_COUNT = 4
     REWARD_BOX_W = 292
-    REWARD_BOX_H = 88
-    REWARD_BOX_GAP = 14
+    REWARD_BOX_H = 68
+    REWARD_BOX_GAP = 10
     REWARD_BOX_X = (WIDTH - REWARD_BOX_W) // 2
     REWARD_BOX_START_Y = HUD_H + 106
     REWARD_NOTICE_FRAMES = 72
@@ -175,6 +217,8 @@ class ShootGame:
     PLAYER_SPEED_CAP = 8
     LASER_COOLDOWN_REWARD_STEP = 3
     LASER_COOLDOWN_MIN = 8
+    LASER_SHOT_COUNT_MIN = 1
+    LASER_SHOT_COUNT_MAX = 3
 
     WEAPON_FAMILY_FAN = "fan"
     WEAPON_FAMILY_LANCE = "lance"
@@ -337,6 +381,42 @@ class ShootGame:
         },
     }
 
+    SUSHI_SCORE = {
+        "tuna": 100,
+        "salmon": 120,
+        "egg": 80,
+        "shrimp": 140,
+        "gunkan": 160,
+    }
+    SUSHI_DRAW_DATA = {
+        "tuna": {"top": 8, "rice": 7, "accent": 15},
+        "salmon": {"top": 9, "rice": 7, "accent": 15},
+        "egg": {"top": 10, "rice": 7, "accent": 5},
+        "shrimp": {"top": 15, "rice": 7, "accent": 8},
+        "gunkan": {"top": 2, "rice": 7, "accent": 10},
+    }
+    ORBIT_PATTERN_COUNT = 2
+    ORBIT_PATTERN_LENGTH = 96
+    ORBIT_ROTATION_FRAME_COUNT = 96
+    ORBIT_RADIUS_X = 42
+    ORBIT_RADIUS_Y = 20
+    ORBIT_SETTLE_RADIUS = 36
+    ORBIT_SETTLE_THRESHOLD = 10
+    BARRIER_STOCK_CAP = 3
+    SETTLE_PHASE_ALIGN = 0
+    SETTLE_PHASE_GLOW = 1
+    SETTLE_PHASE_STOP = 2
+    SETTLE_PHASE_BOUNCE = 3
+    SETTLE_PHASE_SHAKE = 4
+    SETTLE_PHASE_EXPLODE = 5
+    SETTLE_PHASE_FINISH = 6
+    SETTLE_ALIGN_FRAMES = 8
+    SETTLE_GLOW_FRAMES = 14
+    SETTLE_STOP_FRAMES = 8
+    SETTLE_BOUNCE_FRAMES = 22
+    SETTLE_SHAKE_FRAMES = 12
+    SETTLE_EXPLODE_FRAMES = 24
+
     ENEMY_SPRITE_COLUMNS = {
         "basic": 0,
         "zigzag": 1,
@@ -347,6 +427,16 @@ class ShootGame:
         "aimer": 6,
         "rare": 2,
     }
+    ORBIT_SPRITE_TYPES = (
+        "basic",
+        "zigzag",
+        "shooter",
+        "tank",
+        "sprint",
+        "spreader",
+        "aimer",
+        "rare",
+    )
 
     THEMES = {
         "classic_dark": {
@@ -405,7 +495,9 @@ class ShootGame:
         self.carryover_current_weapon_family: str | None = None
         self.carryover_active_weapon_slots: list[str] = []
         self.start_bomb_power_index = self.BOMB_POWER_MAX_LEVEL
+        self.start_laser_count_index = 0
         self.start_fever_enabled = False
+        self.start_prefever_enabled = False
         self.start_boss_pattern_index = 0
         self.start_menu_focus = 0
         self.theme_name = self.start_theme_keys[self.start_theme_index]
@@ -421,7 +513,18 @@ class ShootGame:
         self.fever_decor_frame_w = 0
         self.fever_decor_frame_h = 0
         self.fever_decor_sheet_cols = 0
+        self.settle_sparkle_back_sheet_image = None
+        self.settle_sparkle_front_sheet_image = None
+        self.settle_sparkle_frame_w = 0
+        self.settle_sparkle_frame_h = 0
+        self.settle_sparkle_sheet_cols = 0
+        self.orbit_enemy_sprite_sheet = None
         self._build_fever_decor_sheet()
+        self._build_settle_sparkle_sheet()
+        self._build_orbit_enemy_sprite_sheet()
+        self.orbit_patterns: list[OrbitPattern] = []
+        self.current_orbit_pattern_id = 0
+        self.pending_orbit_pattern_build = 0
 
         self._reset_play_state()
         self.audio.play_bgm("bgm_start")
@@ -471,7 +574,8 @@ class ShootGame:
         self.bomb_active_limit = 1
         self.bomb_restock_flash_timer = 0
 
-        self.laser_active_limit = 3
+        self.laser_shot_count = self._selected_start_laser_count()
+        self.laser_active_limit = 6
         self.laser_cooldown_frames = 24
         self.laser_cooldown = 0
         self.echo_cooldown = 0
@@ -493,6 +597,8 @@ class ShootGame:
         self.boss_defeat_x = 0.0
         self.boss_defeat_y = 0.0
         self.boss_defeat_scale = 1.0
+        self.boss_defeat_sushis: list[BossDefeatSushi] = []
+        self.boss_defeat_cheers: list[BossDefeatCheer] = []
         self.boss_pattern_id: str | None = None
         self.boss_pattern_transition_timer = 0
         self.boss_pattern_label_timer = 0
@@ -506,12 +612,31 @@ class ShootGame:
         self.boss_slow_inflict_enabled = False
         self.player_slow_timer = 0
         self.player_slow_factor = 1.0
+        self.orbit_sushi_queue: list[OrbitSushiEntry] = []
+        self.orbit_acquire_counter = 0
+        self.orbit_base_index = 0
+        self.orbit_rotation_speed_index = 1
+        self.orbit_spin_phase = 0.0
+        self.orbit_spin_speed = 0.24
+        self.sushi_settle_threshold = self.ORBIT_SETTLE_THRESHOLD
+        self.sushi_settle_effect = SushiSettleEffect(active=False, sushis=[])
+        self.barrier_stock = 0
+        if not self.orbit_patterns:
+            self.orbit_patterns = [self.build_orbit_pattern(1000, "orbit_a")]
+            self.pending_orbit_pattern_build = max(0, self.ORBIT_PATTERN_COUNT - len(self.orbit_patterns))
+        else:
+            self.pending_orbit_pattern_build = max(0, self.ORBIT_PATTERN_COUNT - len(self.orbit_patterns))
         self.boss_buff_state = BossBuffState()
         if self.START_DEBUG_FEVER_MENU and self.start_fever_enabled:
             self.boss_buff_state.overload_active = True
             self.boss_buff_state.overload_timer = 0
             self.boss_buff_state.fever_barrier_hits = 2
             self.boss_buff_state.acquired_cycle_buffs = set(self.BUFF_IDS)
+        elif self.START_DEBUG_PREFEVER_MENU and self.start_prefever_enabled:
+            self.boss_buff_state.overload_active = False
+            self.boss_buff_state.overload_timer = 0
+            self.boss_buff_state.fever_barrier_hits = 0
+            self.boss_buff_state.acquired_cycle_buffs = set(self.BUFF_IDS[:4])
 
         self.boss_spawn_count = 0
         self.next_boss_kill_threshold = self.BOSS_TRIGGER_KILLS
@@ -523,6 +648,14 @@ class ShootGame:
             for step in range(1, self.DEBUG_FEVER_START_LOOP_DEPTH + 1):
                 self.next_boss_score_threshold += (step + 1) * 1000
             self.spawn_interval_sec = max(0.28, self.spawn_interval_sec - 0.04 * self.DEBUG_FEVER_START_LOOP_DEPTH)
+        elif self.START_DEBUG_PREFEVER_MENU and self.start_prefever_enabled:
+            pref_depth = max(0, self.DEBUG_FEVER_START_LOOP_DEPTH - 1)
+            self.boss_spawn_count = pref_depth
+            self.next_boss_kill_threshold = self.BOSS_TRIGGER_KILLS * (pref_depth + 1)
+            self.next_boss_score_threshold = self.BOSS_TRIGGER_SCORE
+            for step in range(1, pref_depth + 1):
+                self.next_boss_score_threshold += (step + 1) * 1000
+            self.spawn_interval_sec = max(0.28, self.spawn_interval_sec - 0.04 * pref_depth)
 
         self._sync_start_preview_weapon_state()
         self.shot_pick_flash_timer = 0
@@ -573,7 +706,9 @@ class ShootGame:
             self.DESKTOP_DEBUG_MOBILE_CONTROLS
             or self.START_DEBUG_SUB_WEAPON_MENU
             or self.START_DEBUG_BOMB_POWER_MENU
+            or self.START_DEBUG_LASER_COUNT_MENU
             or self.START_DEBUG_FEVER_MENU
+            or self.START_DEBUG_PREFEVER_MENU
             or self.START_DEBUG_BOSS_PATTERN_MENU
         )
 
@@ -675,7 +810,19 @@ class ShootGame:
                     self.unlocked_weapon_families.append(start_sub_family)
                 self.weapon_levels[start_sub_family] = self.SHOT_LEVEL_SINGLE
                 self.active_weapon_slots.append(start_sub_family)
+
+        if self.START_DEBUG_PREFEVER_MENU and self.start_prefever_enabled:
+            self.current_weapon_family = self.WEAPON_FAMILY_FAN
+            self.active_weapon_slots = [self.WEAPON_FAMILY_FAN]
+            if self.WEAPON_FAMILY_FAN not in self.unlocked_weapon_families:
+                self.unlocked_weapon_families.insert(0, self.WEAPON_FAMILY_FAN)
+            self.weapon_levels[self.WEAPON_FAMILY_FAN] = self.SHOT_LEVEL_MAX
         self.weapon_overdrive_bonus = {family: 0 for family in self.WEAPON_FAMILY_ORDER}
+        self.laser_shot_count = (
+            3
+            if self.START_DEBUG_PREFEVER_MENU and self.start_prefever_enabled
+            else self._selected_start_laser_count()
+        )
 
     def _save_weapon_progress_for_restart(self) -> None:
         self.carryover_unlocked_weapon_families = list(self.unlocked_weapon_families)
@@ -711,6 +858,8 @@ class ShootGame:
             focus += 1
         if self.START_DEBUG_BOMB_POWER_MENU:
             focus += 1
+        if self.START_DEBUG_LASER_COUNT_MENU:
+            focus += 1
         if self.START_DEBUG_FEVER_MENU:
             focus += 1
         if self.START_DEBUG_BOSS_PATTERN_MENU:
@@ -738,6 +887,8 @@ class ShootGame:
             index += 1
         if self.START_DEBUG_BOMB_POWER_MENU:
             index += 1
+        if self.START_DEBUG_LASER_COUNT_MENU:
+            index += 1
         return index
 
     def _start_boss_pattern_focus_index(self) -> int | None:
@@ -748,7 +899,11 @@ class ShootGame:
             index += 1
         if self.START_DEBUG_BOMB_POWER_MENU:
             index += 1
+        if self.START_DEBUG_LASER_COUNT_MENU:
+            index += 1
         if self.START_DEBUG_FEVER_MENU:
+            index += 1
+        if self.START_DEBUG_PREFEVER_MENU:
             index += 1
         return index
 
@@ -756,7 +911,9 @@ class ShootGame:
         return (
             int(self._start_sub_weapon_menu_enabled())
             + int(self.START_DEBUG_BOMB_POWER_MENU)
+            + int(self.START_DEBUG_LASER_COUNT_MENU)
             + int(self.START_DEBUG_FEVER_MENU)
+            + int(self.START_DEBUG_PREFEVER_MENU)
             + int(self.START_DEBUG_BOSS_PATTERN_MENU)
         )
 
@@ -779,8 +936,59 @@ class ShootGame:
         self.start_bomb_power_index = (self.start_bomb_power_index + delta) % len(choices)
         self.audio.play_se("ui_move")
 
+    def _start_laser_count_focus_index(self) -> int | None:
+        if not self.START_DEBUG_LASER_COUNT_MENU:
+            return None
+        index = 2
+        if self._start_sub_weapon_menu_enabled():
+            index += 1
+        if self.START_DEBUG_BOMB_POWER_MENU:
+            index += 1
+        return index
+
+    def _start_laser_count_choices(self) -> list[int]:
+        return list(range(self.LASER_SHOT_COUNT_MIN, self.LASER_SHOT_COUNT_MAX + 1))
+
+    def _selected_start_laser_count(self) -> int:
+        choices = self._start_laser_count_choices()
+        return choices[self.start_laser_count_index % len(choices)]
+
+    def _start_laser_count_label(self) -> str:
+        return str(self._selected_start_laser_count())
+
+    def _start_laser_count_accent(self) -> int:
+        return (12, 10, 8)[self._selected_start_laser_count() - 1]
+
+    def _move_start_laser_count_selection(self, delta: int) -> None:
+        choices = self._start_laser_count_choices()
+        self.start_laser_count_index = (self.start_laser_count_index + delta) % len(choices)
+        self.laser_shot_count = self._selected_start_laser_count()
+        self.audio.play_se("ui_move")
+
     def _toggle_start_fever(self) -> None:
         self.start_fever_enabled = not self.start_fever_enabled
+        if self.start_fever_enabled:
+            self.start_prefever_enabled = False
+        self.audio.play_se("ui_move")
+
+    def _start_prefever_focus_index(self) -> int | None:
+        if not self.START_DEBUG_PREFEVER_MENU:
+            return None
+        index = 2
+        if self._start_sub_weapon_menu_enabled():
+            index += 1
+        if self.START_DEBUG_BOMB_POWER_MENU:
+            index += 1
+        if self.START_DEBUG_LASER_COUNT_MENU:
+            index += 1
+        if self.START_DEBUG_FEVER_MENU:
+            index += 1
+        return index
+
+    def _toggle_start_prefever(self) -> None:
+        self.start_prefever_enabled = not self.start_prefever_enabled
+        if self.start_prefever_enabled:
+            self.start_fever_enabled = False
         self.audio.play_se("ui_move")
 
     def _start_boss_pattern_choices(self) -> list[str | None]:
@@ -861,6 +1069,416 @@ class ShootGame:
         if self.boss_pattern_confetti_timer > 0:
             self.boss_pattern_confetti_timer -= 1
 
+    def build_orbit_pattern(self, seed: int, name: str) -> OrbitPattern:
+        rng = random.Random(seed)
+        rotation_frames: list[list[OrbitSample]] = []
+        shell_rotation_frames: list[list[OrbitSample]] = []
+        phase = rng.uniform(0.0, math.tau)
+        ring_radius = float(self.ORBIT_RADIUS_X - 6 + rng.randint(-2, 2))
+        tilt_axis = normalize_vector(
+            rng.uniform(0.72, 0.96),
+            rng.uniform(-0.24, 0.24),
+            rng.uniform(-0.18, 0.18),
+        )
+        tilt_angle = rng.uniform(0.46, 0.58)
+        tilt_q = quaternion_from_axis_angle(tilt_axis, tilt_angle)
+        spin_axis = normalize_vector(
+            rng.uniform(0.20, 0.55),
+            rng.uniform(0.64, 0.94),
+            rng.uniform(0.26, 0.62),
+        )
+        spin_phase = rng.uniform(0.0, math.tau)
+        spin_speed = rng.uniform(0.85, 1.18)
+        orbit_phase = rng.uniform(0.0, math.tau)
+        projection_scale = rng.uniform(0.012, 0.017)
+        vertical_bias = 1.0
+        shell_init_q = quaternion_from_axis_angle((1.0, 0.0, 0.0), math.pi * 0.5)
+        local_main_points: list[tuple[float, float, float]] = []
+        local_shell_points: list[tuple[float, float, float]] = []
+
+        for idx in range(self.ORBIT_PATTERN_LENGTH):
+            angle = phase + math.tau * idx / self.ORBIT_PATTERN_LENGTH
+            orbit_x = math.cos(orbit_phase + angle) * ring_radius
+            orbit_y = math.sin(orbit_phase + angle) * ring_radius
+            main_local = (orbit_x, orbit_y, 0.0)
+            shell_local = rotate_vector_by_quaternion(main_local, shell_init_q)
+            local_main_points.append(main_local)
+            local_shell_points.append(shell_local)
+
+        for frame_idx in range(self.ORBIT_ROTATION_FRAME_COUNT):
+            frame_samples: list[OrbitSample] = []
+            shell_frame_samples: list[OrbitSample] = []
+            ring_spin_angle = spin_phase + math.tau * (frame_idx / self.ORBIT_ROTATION_FRAME_COUNT) * spin_speed
+            spin_q = quaternion_from_axis_angle(spin_axis, ring_spin_angle)
+            for idx in range(self.ORBIT_PATTERN_LENGTH):
+                tilted_x, tilted_y, tilted_z = rotate_vector_by_quaternion(local_main_points[idx], tilt_q)
+                rotated_x, rotated_y, rotated_z = rotate_vector_by_quaternion(
+                    (tilted_x, tilted_y, tilted_z),
+                    spin_q,
+                )
+                perspective = 1.0 / (1.0 + max(-22.0, rotated_z) * projection_scale)
+                dx = int(round(rotated_x * perspective))
+                dy = int(round(rotated_y * perspective * vertical_bias))
+                depth = max(-1.3, min(1.3, rotated_z / max(12.0, ring_radius * 0.48)))
+                scale = 0.78 + ((depth + 1.0) * 0.18)
+                if depth < -0.16:
+                    brightness_rank = 0
+                elif depth > 0.16:
+                    brightness_rank = 2
+                else:
+                    brightness_rank = 1
+                frame_samples.append(
+                    OrbitSample(
+                        dx=dx,
+                        dy=dy,
+                        depth=depth,
+                        scale=scale,
+                        brightness_rank=brightness_rank,
+                    )
+                )
+                tilted_shell_x, tilted_shell_y, tilted_shell_z = rotate_vector_by_quaternion(local_shell_points[idx], tilt_q)
+                rotated_shell_x, rotated_shell_y, rotated_shell_z = rotate_vector_by_quaternion(
+                    (tilted_shell_x, tilted_shell_y, tilted_shell_z),
+                    spin_q,
+                )
+                shell_perspective = 1.0 / (1.0 + max(-22.0, rotated_shell_z) * projection_scale)
+                shell_dx = int(round(rotated_shell_x * shell_perspective))
+                shell_dy = int(round(rotated_shell_y * shell_perspective * vertical_bias))
+                shell_depth = max(-1.3, min(1.3, rotated_shell_z / max(12.0, ring_radius * 0.48)))
+                shell_scale = 0.92 + ((shell_depth + 1.0) * 0.08)
+                if shell_depth < -0.16:
+                    shell_brightness = 0
+                elif shell_depth > 0.16:
+                    shell_brightness = 2
+                else:
+                    shell_brightness = 1
+                shell_frame_samples.append(
+                    OrbitSample(
+                        dx=shell_dx,
+                        dy=shell_dy,
+                        depth=shell_depth,
+                        scale=shell_scale,
+                        brightness_rank=shell_brightness,
+                    )
+                )
+            rotation_frames.append(frame_samples)
+            shell_rotation_frames.append(shell_frame_samples)
+
+        base_samples = rotation_frames[0] if rotation_frames else []
+        return OrbitPattern(
+            samples=base_samples,
+            rotation_frames=rotation_frames,
+            shell_rotation_frames=shell_rotation_frames,
+            length=len(base_samples),
+            rotation_length=len(rotation_frames),
+            name=name,
+        )
+
+    def maybe_build_orbit_pattern_in_nonbattle(self) -> None:
+        if self.phase != GamePhase.REWARD_SELECT:
+            return
+        if self.pending_orbit_pattern_build <= 0:
+            return
+        seed = 2000 + len(self.orbit_patterns) * 173
+        self.orbit_patterns.append(self.build_orbit_pattern(seed, f"orbit_{len(self.orbit_patterns)}"))
+        self.pending_orbit_pattern_build -= 1
+
+    def add_orbit_sushi(self, enemy: Enemy) -> None:
+        self.orbit_sushi_queue.append(
+            OrbitSushiEntry(
+                sushi_type=enemy.sushi_type,
+                enemy_type=enemy.enemy_type,
+                acquire_order=self.orbit_acquire_counter,
+                anim_offset=enemy.anim_offset,
+                anim_dir=enemy.anim_dir,
+                display_scale=enemy.display_scale,
+            )
+        )
+        self.orbit_acquire_counter += 1
+
+    def update_orbit_sushi(self) -> None:
+        pattern = self._current_orbit_pattern()
+        if pattern.length <= 0:
+            return
+        self.orbit_base_index = (self.orbit_base_index + self.orbit_rotation_speed_index) % pattern.length
+        if pattern.rotation_length > 0:
+            self.orbit_spin_phase = (self.orbit_spin_phase + self.orbit_spin_speed) % pattern.rotation_length
+
+    def _current_orbit_pattern(self) -> OrbitPattern:
+        if not self.orbit_patterns:
+            self.orbit_patterns = [self.build_orbit_pattern(1000, "orbit_a")]
+        return self.orbit_patterns[self.current_orbit_pattern_id % len(self.orbit_patterns)]
+
+    def _orbit_render_states(
+        self,
+        entries: list[OrbitSushiEntry],
+        *,
+        base_index: int | None = None,
+    ) -> list[tuple[OrbitSushiEntry, OrbitSample, float, float]]:
+        pattern = self._current_orbit_pattern()
+        if pattern.length <= 0 or not entries:
+            return []
+
+        count = len(entries)
+        slot_count = max(1, self.sushi_settle_threshold)
+        spacing = max(1, pattern.length // slot_count)
+        start = self.orbit_base_index if base_index is None else base_index
+        use_interpolated_rotation = bool(pattern.rotation_frames and pattern.rotation_length > 1)
+        spin_index = 0
+        next_spin_index = 0
+        spin_blend = 0.0
+        frame_samples = pattern.samples
+        next_frame_samples = pattern.samples
+        if use_interpolated_rotation:
+            spin_pos = self.orbit_spin_phase % pattern.rotation_length
+            spin_index = int(math.floor(spin_pos)) % pattern.rotation_length
+            next_spin_index = (spin_index + 1) % pattern.rotation_length
+            spin_blend = spin_pos - math.floor(spin_pos)
+            frame_samples = pattern.rotation_frames[spin_index]
+            next_frame_samples = pattern.rotation_frames[next_spin_index]
+        elif pattern.rotation_frames:
+            frame_samples = pattern.rotation_frames[0]
+            next_frame_samples = frame_samples
+        states: list[tuple[OrbitSushiEntry, OrbitSample, float, float]] = []
+
+        for idx, entry in enumerate(entries):
+            sample_index = (start + idx * spacing) % pattern.length
+            sample = frame_samples[sample_index]
+            if use_interpolated_rotation:
+                next_sample = next_frame_samples[sample_index]
+                dx = sample.dx + (next_sample.dx - sample.dx) * spin_blend
+                dy = sample.dy + (next_sample.dy - sample.dy) * spin_blend
+                depth = sample.depth + (next_sample.depth - sample.depth) * spin_blend
+                scale = sample.scale + (next_sample.scale - sample.scale) * spin_blend
+                if depth < -0.16:
+                    brightness_rank = 0
+                elif depth > 0.16:
+                    brightness_rank = 2
+                else:
+                    brightness_rank = 1
+                sample = OrbitSample(
+                    dx=int(round(dx)),
+                    dy=int(round(dy)),
+                    depth=depth,
+                    scale=scale,
+                    brightness_rank=brightness_rank,
+                )
+            x = self.player.x + sample.dx
+            y = self.player.y + sample.dy
+            states.append((entry, sample, x, y))
+
+        return states
+
+    def _orbit_shell_sparkle_states(self) -> list[tuple[OrbitSample, float, float, int]]:
+        if self.phase != GamePhase.PLAYING:
+            return []
+        pattern = self._current_orbit_pattern()
+        if pattern.length <= 0 or not pattern.shell_rotation_frames:
+            return []
+
+        slot_count = self.ORBIT_SHELL_SPARKLE_SLOT_COUNT
+        spacing = max(1, pattern.length // slot_count)
+        use_interpolated_rotation = pattern.rotation_length > 1
+        spin_pos = self.orbit_spin_phase % max(1, pattern.rotation_length)
+        spin_index = int(math.floor(spin_pos)) % max(1, pattern.rotation_length)
+        next_spin_index = (spin_index + 1) % max(1, pattern.rotation_length)
+        spin_blend = spin_pos - math.floor(spin_pos)
+        frame_samples = pattern.shell_rotation_frames[spin_index]
+        next_frame_samples = pattern.shell_rotation_frames[next_spin_index]
+        states: list[tuple[OrbitSample, float, float, int]] = []
+
+        for idx in range(slot_count):
+            sample_index = (self.orbit_base_index + idx * spacing) % pattern.length
+            sample = frame_samples[sample_index]
+            if use_interpolated_rotation:
+                next_sample = next_frame_samples[sample_index]
+                dx = sample.dx + (next_sample.dx - sample.dx) * spin_blend
+                dy = sample.dy + (next_sample.dy - sample.dy) * spin_blend
+                depth = sample.depth + (next_sample.depth - sample.depth) * spin_blend
+                scale = sample.scale + (next_sample.scale - sample.scale) * spin_blend
+                if depth < -0.16:
+                    brightness_rank = 0
+                elif depth > 0.16:
+                    brightness_rank = 2
+                else:
+                    brightness_rank = 1
+                sample = OrbitSample(
+                    dx=int(round(dx)),
+                    dy=int(round(dy)),
+                    depth=depth,
+                    scale=scale,
+                    brightness_rank=brightness_rank,
+                )
+            x = self.player.x + sample.dx
+            y = self.player.y + sample.dy
+            states.append((sample, x, y, idx))
+
+        return states
+
+    def try_start_sushi_settlement(self) -> None:
+        if self.sushi_settle_effect.active:
+            return
+        if len(self.orbit_sushi_queue) < self.sushi_settle_threshold:
+            return
+
+        consumed = list(self.orbit_sushi_queue[: self.sushi_settle_threshold])
+        start_states = self._orbit_render_states(consumed)
+        self.orbit_sushi_queue = self.orbit_sushi_queue[self.sushi_settle_threshold :]
+        self.start_sushi_settle_effect(consumed, start_states)
+
+    def start_sushi_settle_effect(
+        self,
+        consumed: list[OrbitSushiEntry],
+        start_states: list[tuple[OrbitSushiEntry, OrbitSample, float, float]],
+    ) -> None:
+        if not consumed:
+            return
+
+        n = len(consumed)
+        settle_sushis: list[SettlingSushi] = []
+        center_x = self.player.x
+        center_y = self.player.y - 2
+        base_rotation = -math.pi / 2
+
+        for idx, entry in enumerate(consumed):
+            theta = base_rotation + (idx / n) * math.tau
+            start_x = center_x
+            start_y = center_y
+            if idx < len(start_states):
+                _entry, _sample, start_x, start_y = start_states[idx]
+            target_x = center_x + math.cos(theta) * self.ORBIT_SETTLE_RADIUS
+            target_y = center_y + math.sin(theta) * self.ORBIT_SETTLE_RADIUS
+            speed = 2.6 + idx * 0.07
+            settle_sushis.append(
+                SettlingSushi(
+                    sushi_type=entry.sushi_type,
+                    enemy_type=entry.enemy_type,
+                    start_x=start_x,
+                    start_y=start_y,
+                    target_x=target_x,
+                    target_y=target_y,
+                    current_x=start_x,
+                    current_y=start_y,
+                    circle_angle=theta,
+                    anim_offset=entry.anim_offset,
+                    anim_dir=entry.anim_dir,
+                    display_scale=entry.display_scale,
+                    jump_delay=idx * 2,
+                    explode_vx=math.cos(theta) * speed,
+                    explode_vy=math.sin(theta) * speed,
+                )
+            )
+
+        self.sushi_settle_effect = SushiSettleEffect(
+            active=True,
+            phase=self.SETTLE_PHASE_ALIGN,
+            timer=0,
+            sushis=settle_sushis,
+            gained_score=self.calc_sushi_settle_score([entry.sushi_type for entry in consumed]),
+            gained_barrier=1,
+            center_x=center_x,
+            center_y=center_y,
+        )
+
+    def calc_sushi_settle_score(self, consumed_types: list[str]) -> int:
+        return sum(self.SUSHI_SCORE.get(sushi_type, 100) for sushi_type in consumed_types)
+
+    def update_sushi_settle_effect(self) -> None:
+        effect = self.sushi_settle_effect
+        if not effect.active or not effect.sushis:
+            return
+
+        effect.timer += 1
+
+        if effect.phase == self.SETTLE_PHASE_ALIGN:
+            t = min(1.0, effect.timer / self.SETTLE_ALIGN_FRAMES)
+            u = 1.0 - (1.0 - t) * (1.0 - t)
+            for sushi in effect.sushis:
+                sushi.current_x = sushi.start_x + (sushi.target_x - sushi.start_x) * u
+                sushi.current_y = sushi.start_y + (sushi.target_y - sushi.start_y) * u
+                sushi.offset_x = 0.0
+                sushi.offset_y = 0.0
+            if effect.timer >= self.SETTLE_ALIGN_FRAMES:
+                effect.phase = self.SETTLE_PHASE_GLOW
+                effect.timer = 0
+            return
+
+        if effect.phase == self.SETTLE_PHASE_GLOW:
+            if not effect.score_applied:
+                self.score += effect.gained_score
+                effect.score_applied = True
+            if effect.timer >= self.SETTLE_GLOW_FRAMES:
+                effect.phase = self.SETTLE_PHASE_STOP
+                effect.timer = 0
+            return
+
+        if effect.phase == self.SETTLE_PHASE_STOP:
+            if effect.timer >= self.SETTLE_STOP_FRAMES:
+                effect.phase = self.SETTLE_PHASE_BOUNCE
+                effect.timer = 0
+            return
+
+        if effect.phase == self.SETTLE_PHASE_BOUNCE:
+            all_done = True
+            for sushi in effect.sushis:
+                local_timer = effect.timer - sushi.jump_delay
+                if local_timer < 0:
+                    all_done = False
+                    sushi.offset_y = 0.0
+                    continue
+                if local_timer < self.SETTLE_BOUNCE_FRAMES:
+                    all_done = False
+                    bounce_ratio = local_timer / self.SETTLE_BOUNCE_FRAMES
+                    sushi.offset_y = -abs(math.sin(bounce_ratio * math.tau * 2.0)) * 5.0
+                else:
+                    sushi.offset_y = 0.0
+            if all_done:
+                effect.phase = self.SETTLE_PHASE_SHAKE
+                effect.timer = 0
+            return
+
+        if effect.phase == self.SETTLE_PHASE_SHAKE:
+            for idx, sushi in enumerate(effect.sushis):
+                sushi.offset_x = -1.0 if (effect.timer + idx) % 2 == 0 else 1.0
+                sushi.offset_y = 1.0 if (effect.timer + idx * 2) % 3 == 0 else -1.0
+            if effect.timer >= self.SETTLE_SHAKE_FRAMES:
+                effect.phase = self.SETTLE_PHASE_EXPLODE
+                effect.timer = 0
+                for sushi in effect.sushis:
+                    sushi.offset_x = 0.0
+                    sushi.offset_y = 0.0
+            return
+
+        if effect.phase == self.SETTLE_PHASE_EXPLODE:
+            for sushi in effect.sushis:
+                sushi.current_x += sushi.explode_vx
+                sushi.current_y += sushi.explode_vy
+            if effect.timer >= self.SETTLE_EXPLODE_FRAMES:
+                effect.phase = self.SETTLE_PHASE_FINISH
+                effect.timer = 0
+            return
+
+        if effect.phase == self.SETTLE_PHASE_FINISH:
+            if self.barrier_stock < self.BARRIER_STOCK_CAP:
+                self.add_barrier_stock(effect.gained_barrier)
+                self.audio.play_se("weapon_level_up")
+            else:
+                self.score += effect.gained_score
+                self.audio.play_se("item_tea_get")
+            self.sushi_settle_effect = SushiSettleEffect(active=False, sushis=[])
+
+    def add_barrier_stock(self, amount: int) -> None:
+        self.barrier_stock = min(self.BARRIER_STOCK_CAP, self.barrier_stock + amount)
+
+    def consume_barrier_if_possible(self) -> bool:
+        if self.barrier_stock <= 0:
+            return False
+        self.barrier_stock -= 1
+        self.player.invincible_timer = max(self.player.invincible_timer, 18)
+        self._spawn_hit_spark(self.player.x, self.player.y - 2, scale=1.1)
+        self.audio.play_se("weapon_level_up")
+        return True
+
     def _random_star_color(self) -> int:
         return random.choice(self.star_colors)
 
@@ -876,6 +1494,233 @@ class ShootGame:
                 ]
             )
         return stars
+
+    def _build_orbit_enemy_sprite_sheet(self) -> None:
+        cell = self.ORBIT_SPRITE_SIZE
+        rows = len(self.ORBIT_SPRITE_TYPES)
+        cols = self.ENEMY_SPRITE_FRAMES
+        sheet = pyxel.Image(cell * cols, cell * rows)
+        sheet.cls(0)
+        src = pyxel.image(self.ENEMY_SPRITE_BANK)
+
+        for row, enemy_type in enumerate(self.ORBIT_SPRITE_TYPES):
+            src_u = self.ENEMY_SPRITE_COLUMNS.get(enemy_type, 0) * self.ENEMY_SPRITE_SIZE
+            for frame in range(self.ENEMY_SPRITE_FRAMES):
+                src_v = frame * self.ENEMY_SPRITE_SIZE
+                dst_x = frame * cell
+                dst_y = row * cell
+                for sy in range(cell):
+                    sample_y = min(self.ENEMY_SPRITE_SIZE - 1, int((sy + 0.5) * self.ENEMY_SPRITE_SIZE / cell))
+                    for sx in range(cell):
+                        sample_x = min(self.ENEMY_SPRITE_SIZE - 1, int((sx + 0.5) * self.ENEMY_SPRITE_SIZE / cell))
+                        color = src.pget(src_u + sample_x, src_v + sample_y)
+                        if color == self.ENEMY_SPRITE_COLKEY:
+                            continue
+                        sheet.pset(dst_x + sx, dst_y + sy, color)
+
+        self.orbit_enemy_sprite_sheet = sheet
+
+    def _build_settle_sparkle_sheet(self) -> None:
+        total_frames = (
+            self.SETTLE_ALIGN_FRAMES
+            + self.SETTLE_GLOW_FRAMES
+            + self.SETTLE_STOP_FRAMES
+            + self.SETTLE_BOUNCE_FRAMES
+            + self.SETTLE_SHAKE_FRAMES
+            + self.SETTLE_EXPLODE_FRAMES
+        )
+        frame_w = self.ORBIT_SETTLE_RADIUS * 2 + 64
+        frame_h = self.ORBIT_SETTLE_RADIUS * 2 + 64
+        origin_x = frame_w // 2
+        origin_y = frame_h // 2
+        cols = 8
+        rows = max(1, math.ceil(total_frames / cols))
+        back_sheet = pyxel.Image(frame_w * cols, frame_h * rows)
+        front_sheet = pyxel.Image(frame_w * cols, frame_h * rows)
+        back_sheet.cls(0)
+        front_sheet.cls(0)
+        explode_start_frame = (
+            self.SETTLE_ALIGN_FRAMES
+            + self.SETTLE_GLOW_FRAMES
+            + self.SETTLE_STOP_FRAMES
+            + self.SETTLE_BOUNCE_FRAMES
+            + self.SETTLE_SHAKE_FRAMES
+        )
+
+        rng = random.Random(20260315)
+        sparkle_specs: list[dict[str, float | int | str]] = []
+        slot_count = self.ORBIT_SETTLE_THRESHOLD
+        base_rotation = -math.pi / 2
+        inner_radius = self.ORBIT_SETTLE_RADIUS - 6.0
+        for idx in range(slot_count):
+            angle = base_rotation + (idx / max(1, slot_count)) * math.tau
+            sparkle_specs.append(
+                {
+                    "group": "back",
+                    "base_angle": angle,
+                    "radius": inner_radius + rng.uniform(-0.6, 0.6),
+                    "radius_wobble": rng.uniform(0.25, 0.65),
+                    "drift": rng.uniform(-0.002, 0.002),
+                    "phase": rng.uniform(0.0, math.tau),
+                    "anim_phase": idx % self.SETTLE_SPARKLE_FRAMES,
+                    "scale": rng.uniform(0.90, 1.0),
+                    "sway_x": rng.uniform(0.2, 0.6),
+                    "sway_y": rng.uniform(0.2, 0.6),
+                    "start_frame": idx,
+                    "end_padding": rng.randrange(0, 4),
+                    "explode_delay": rng.randrange(0, 2),
+                    "explode_push": rng.uniform(16.0, 24.0),
+                }
+            )
+
+        src = pyxel.image(self.SETTLE_SPARKLE_BANK)
+        for frame_idx in range(total_frames):
+            cell_x = (frame_idx % cols) * frame_w
+            cell_y = (frame_idx // cols) * frame_h
+            progress = frame_idx / max(1, total_frames - 1)
+
+            for spec in sparkle_specs:
+                start_frame = int(spec["start_frame"])
+                end_frame = total_frames - int(spec["end_padding"])
+                if frame_idx < start_frame or frame_idx >= end_frame:
+                    continue
+                base_angle = float(spec["base_angle"])
+                angle = (
+                    base_angle
+                    + math.sin(float(spec["phase"]) + progress * math.tau * 1.20) * 0.10
+                    + frame_idx * float(spec["drift"])
+                )
+                radius = float(spec["radius"]) + math.sin(float(spec["phase"]) + progress * math.tau * 2.1) * float(spec["radius_wobble"])
+                radius = max(self.ORBIT_SETTLE_RADIUS * 0.80, min(self.ORBIT_SETTLE_RADIUS * 1.18, radius))
+                explode_elapsed = frame_idx - explode_start_frame - int(spec["explode_delay"])
+                if explode_elapsed > 0:
+                    explode_t = min(1.0, explode_elapsed / max(1, self.SETTLE_EXPLODE_FRAMES - int(spec["explode_delay"])))
+                    explode_u = 1.0 - (1.0 - explode_t) * (1.0 - explode_t) * (1.0 - explode_t)
+                    radius += float(spec["explode_push"]) * explode_u
+                local_x = math.cos(angle) * radius + math.sin(progress * math.tau + float(spec["phase"])) * float(spec["sway_x"])
+                local_y = math.sin(angle) * radius + math.cos(progress * math.tau * 0.8 + float(spec["phase"])) * float(spec["sway_y"])
+                draw_x = int(round(cell_x + origin_x + local_x))
+                draw_y = int(round(cell_y + origin_y + local_y))
+                sparkle_frame = ((frame_idx // 2) + int(spec["anim_phase"])) % self.SETTLE_SPARKLE_FRAMES
+                src_u = self.SETTLE_SPARKLE_U
+                src_v = self.SETTLE_SPARKLE_V + sparkle_frame * self.SETTLE_SPARKLE_SIZE
+                scale = float(spec["scale"])
+                dest = front_sheet if spec["group"] == "front" else back_sheet
+                self._stamp_scaled_sprite_to_image(
+                    dest,
+                    src,
+                    src_u,
+                    src_v,
+                    self.SETTLE_SPARKLE_SIZE,
+                    self.SETTLE_SPARKLE_SIZE,
+                    draw_x - int(round((self.SETTLE_SPARKLE_SIZE * scale) / 2)),
+                    draw_y - int(round((self.SETTLE_SPARKLE_SIZE * scale) / 2)),
+                    scale,
+                    self.SETTLE_SPARKLE_COLKEY,
+                )
+                if explode_elapsed > 0:
+                    trail_count = 2
+                    trail_scale = 0.5
+                    trail_step = 7.0 + explode_u * 8.0
+                    for trail_idx in range(trail_count):
+                        trail_back = (trail_idx + 1) * trail_step
+                        trail_x = draw_x - int(round(math.cos(angle) * trail_back))
+                        trail_y = draw_y - int(round(math.sin(angle) * trail_back))
+                        self._stamp_scaled_sprite_to_image(
+                            dest,
+                            src,
+                            src_u,
+                            src_v,
+                            self.SETTLE_SPARKLE_SIZE,
+                            self.SETTLE_SPARKLE_SIZE,
+                            trail_x - int(round((self.SETTLE_SPARKLE_SIZE * trail_scale) / 2)),
+                            trail_y - int(round((self.SETTLE_SPARKLE_SIZE * trail_scale) / 2)),
+                            trail_scale,
+                            self.SETTLE_SPARKLE_COLKEY,
+                        )
+
+        self.settle_sparkle_back_sheet_image = back_sheet
+        self.settle_sparkle_front_sheet_image = front_sheet
+        self.settle_sparkle_frame_w = frame_w
+        self.settle_sparkle_frame_h = frame_h
+        self.settle_sparkle_sheet_cols = cols
+
+    def _stamp_scaled_sprite_to_image(
+        self,
+        dest: pyxel.Image,
+        src: pyxel.Image,
+        src_u: int,
+        src_v: int,
+        src_w: int,
+        src_h: int,
+        dst_x: int,
+        dst_y: int,
+        scale: float,
+        colkey: int,
+    ) -> None:
+        draw_w = max(1, int(round(src_w * scale)))
+        draw_h = max(1, int(round(src_h * scale)))
+        for dy in range(draw_h):
+            sy = min(src_h - 1, int((dy + 0.5) * src_h / draw_h))
+            for dx in range(draw_w):
+                sx = min(src_w - 1, int((dx + 0.5) * src_w / draw_w))
+                color = src.pget(src_u + sx, src_v + sy)
+                if color == colkey:
+                    continue
+                dest_x = dst_x + dx
+                dest_y = dst_y + dy
+                if 0 <= dest_x < dest.width and 0 <= dest_y < dest.height:
+                    dest.pset(dest_x, dest_y, color)
+
+    def _settle_total_elapsed_frames(self, effect: SushiSettleEffect) -> int:
+        phase_offsets = {
+            self.SETTLE_PHASE_ALIGN: 0,
+            self.SETTLE_PHASE_GLOW: self.SETTLE_ALIGN_FRAMES,
+            self.SETTLE_PHASE_STOP: self.SETTLE_ALIGN_FRAMES + self.SETTLE_GLOW_FRAMES,
+            self.SETTLE_PHASE_BOUNCE: self.SETTLE_ALIGN_FRAMES + self.SETTLE_GLOW_FRAMES + self.SETTLE_STOP_FRAMES,
+            self.SETTLE_PHASE_SHAKE: self.SETTLE_ALIGN_FRAMES + self.SETTLE_GLOW_FRAMES + self.SETTLE_STOP_FRAMES + self.SETTLE_BOUNCE_FRAMES,
+            self.SETTLE_PHASE_EXPLODE: self.SETTLE_ALIGN_FRAMES + self.SETTLE_GLOW_FRAMES + self.SETTLE_STOP_FRAMES + self.SETTLE_BOUNCE_FRAMES + self.SETTLE_SHAKE_FRAMES,
+            self.SETTLE_PHASE_FINISH: self.SETTLE_ALIGN_FRAMES + self.SETTLE_GLOW_FRAMES + self.SETTLE_STOP_FRAMES + self.SETTLE_BOUNCE_FRAMES + self.SETTLE_SHAKE_FRAMES + self.SETTLE_EXPLODE_FRAMES,
+        }
+        return phase_offsets.get(effect.phase, 0) + effect.timer
+
+    def _orbit_enemy_sprite_uv(self, enemy_type: str, anim_offset: int, anim_dir: int) -> tuple[int, int]:
+        try:
+            row = self.ORBIT_SPRITE_TYPES.index(enemy_type)
+        except ValueError:
+            row = 0
+        frame = ((self.frame_count // 3) * anim_dir + anim_offset) % self.ENEMY_SPRITE_FRAMES
+        return frame * self.ORBIT_SPRITE_SIZE, row * self.ORBIT_SPRITE_SIZE
+
+    def _draw_orbit_enemy_sprite(
+        self,
+        x: float,
+        y: float,
+        *,
+        enemy_type: str,
+        anim_offset: int,
+        anim_dir: int,
+        scale: float,
+    ) -> None:
+        if self.orbit_enemy_sprite_sheet is None:
+            self._build_orbit_enemy_sprite_sheet()
+        u, v = self._orbit_enemy_sprite_uv(enemy_type, anim_offset, anim_dir)
+        draw_w = self.ORBIT_SPRITE_SIZE * scale
+        draw_h = self.ORBIT_SPRITE_SIZE * scale
+        draw_x = int(round(x - draw_w / 2))
+        draw_y = int(round(y - draw_h / 2))
+        pyxel.blt(
+            draw_x,
+            draw_y,
+            self.orbit_enemy_sprite_sheet,
+            u,
+            v,
+            self.ORBIT_SPRITE_SIZE,
+            self.ORBIT_SPRITE_SIZE,
+            0,
+            0.0,
+            scale,
+        )
 
     def _make_fever_particle_specs(self) -> list[dict[str, float | int | str]]:
         rng = random.Random(20260314)
@@ -2122,6 +2967,15 @@ class ShootGame:
                 accent_color=12,
                 tag="UTILITY",
             )
+        if reward_id == "laser_count_up":
+            next_count = min(self.LASER_SHOT_COUNT_MAX, self.laser_shot_count + 1)
+            return RewardChoice(
+                reward_id=reward_id,
+                title="LASER COUNT UP",
+                description=f"Fire {next_count} lasers at once",
+                accent_color=14,
+                tag="UTILITY",
+            )
         if reward_id == "laser_tune":
             next_wait = max(
                 self.LASER_COOLDOWN_MIN,
@@ -2173,6 +3027,8 @@ class ShootGame:
             reward_ids.append(f"unlock_{family}")
         if self.player.speed_x < self.PLAYER_SPEED_CAP or self.player.speed_y < self.PLAYER_SPEED_CAP:
             reward_ids.append("move_up")
+        if self.laser_shot_count < self.LASER_SHOT_COUNT_MAX:
+            reward_ids.append("laser_count_up")
         if self.laser_cooldown_frames > self.LASER_COOLDOWN_MIN:
             reward_ids.append("laser_tune")
 
@@ -2224,6 +3080,10 @@ class ShootGame:
         if reward_id == "move_up":
             speed_gap = self.PLAYER_SPEED_CAP - max(self.player.speed_x, self.player.speed_y)
             return max(0.8, 1.5 + speed_gap * 0.72 - loop_depth * 0.08)
+
+        if reward_id == "laser_count_up":
+            shot_gap = self.LASER_SHOT_COUNT_MAX - self.laser_shot_count
+            return max(0.9, 2.1 + shot_gap * 1.1 + loop_depth * 0.14)
 
         if reward_id == "laser_tune":
             cooldown_gap = self.laser_cooldown_frames - self.LASER_COOLDOWN_MIN
@@ -2327,6 +3187,13 @@ class ShootGame:
             self.reward_pair_preview_index = pairs.index(active)
             return
 
+        if len(active) == 2:
+            active_set = set(active)
+            for idx, pair in enumerate(pairs):
+                if set(pair) == active_set:
+                    self.reward_pair_preview_index = idx
+                    return
+
         self.reward_pair_preview_index = min(self.reward_pair_preview_index, len(pairs) - 1)
         self._set_active_weapon_pair(pairs[self.reward_pair_preview_index])
 
@@ -2379,6 +3246,8 @@ class ShootGame:
         self.homing_lasers.clear()
         self.weapon_items.clear()
         self.heal_items.clear()
+        self.boss_defeat_sushis.clear()
+        self.boss_defeat_cheers.clear()
         self._clear_boss_pattern_state()
         self.reward_choices = self._build_reward_choices()
         self.reward_selection_index = 0
@@ -2429,6 +3298,8 @@ class ShootGame:
         elif choice.reward_id == "move_up":
             self.player.speed_x = min(self.PLAYER_SPEED_CAP, self.player.speed_x + 1)
             self.player.speed_y = min(self.PLAYER_SPEED_CAP, self.player.speed_y + 1)
+        elif choice.reward_id == "laser_count_up":
+            self.laser_shot_count = min(self.LASER_SHOT_COUNT_MAX, self.laser_shot_count + 1)
         elif choice.reward_id == "laser_tune":
             self.laser_cooldown_frames = max(
                 self.LASER_COOLDOWN_MIN,
@@ -3150,6 +4021,9 @@ class ShootGame:
         if self.boss_defeat_timer <= 0 and self.boss_defeat_confetti_timer <= 0:
             return
 
+        self._update_boss_defeat_sushis()
+        self._update_boss_defeat_cheers()
+
         if self.boss_defeat_confetti_timer > 0:
             self.boss_defeat_confetti_timer -= 1
 
@@ -3189,6 +4063,8 @@ class ShootGame:
         if self.boss_defeat_timer <= 0 and self.boss_defeat_confetti_timer <= 0:
             self.boss_event_started = False
             self.boss_defeated = True
+            self.boss_defeat_sushis.clear()
+            self.boss_defeat_cheers.clear()
             self._advance_boss_progression()
             self._start_reward_selection()
 
@@ -3203,7 +4079,7 @@ class ShootGame:
         self.audio.play_bgm("bgm_stage")
         self.player.hp = self.player.max_hp
         self.enemy_bullets.clear()
-        self._restock_bombs_full()
+        self.bomb_stock = min(self._bomb_capacity(), self.bomb_stock + 1)
 
         burst_scale = self._boss_burst_scale(boss)
         self._spawn_enemy_burst(boss.x, boss.y, scale=burst_scale)
@@ -3214,6 +4090,7 @@ class ShootGame:
         self.bullets.clear()
         self.echo_shots.clear()
         self.bombs.clear()
+        self.active_bomb_visuals.clear()
         self.homing_lasers.clear()
         self.weapon_items.clear()
         self.heal_items.clear()
@@ -3222,8 +4099,156 @@ class ShootGame:
         self.boss_defeat_x = boss.x
         self.boss_defeat_y = boss.y
         self.boss_defeat_scale = boss.display_scale
+        self._spawn_boss_defeat_sushi_burst(boss.x, boss.y, boss.display_scale)
+        self._spawn_boss_defeat_cheers(boss.x, boss.y, boss.display_scale)
         self.boss = None
         self.boss_defeated = False
+
+    def _spawn_boss_defeat_sushi_burst(self, x: float, y: float, boss_scale: float) -> None:
+        rng = random.Random(self.frame_count * 97 + int(x * 3) + int(y * 5))
+        burst: list[BossDefeatSushi] = []
+        size_pool = (
+            [0.82] * 34
+            + [0.98] * 34
+            + [1.14] * 22
+            + [1.34] * 12
+        )
+        rng.shuffle(size_pool)
+        delay_pool = [((idx % 14) * 3) + rng.randrange(0, 3) for idx in range(self.BOSS_DEFEAT_SUSHI_COUNT)]
+        rng.shuffle(delay_pool)
+
+        for idx in range(self.BOSS_DEFEAT_SUSHI_COUNT):
+            angle = (math.tau / self.BOSS_DEFEAT_SUSHI_COUNT) * idx + rng.uniform(-0.045, 0.045)
+            speed_band = rng.choice((0.62, 0.82, 1.04, 1.34, 1.58))
+            speed = rng.uniform(3.8, 9.4) * speed_band * max(1.0, boss_scale * 0.74)
+            spawn_r = rng.uniform(0.0, 10.0)
+            depth = rng.uniform(-0.38, 0.42)
+            scale = size_pool[idx % len(size_pool)] * (1.0 + depth * 0.16)
+            if speed_band >= 1.34:
+                scale *= rng.uniform(0.84, 0.92)
+            elif speed_band <= 0.82:
+                scale *= rng.uniform(1.08, 1.18)
+            wave_delay = delay_pool[idx]
+            if scale >= 1.28:
+                wave_delay += rng.randrange(4, 10)
+                speed *= rng.uniform(0.82, 0.90)
+            elif scale >= 1.10:
+                wave_delay += rng.randrange(1, 4)
+                speed *= rng.uniform(0.92, 0.98)
+            burst.append(
+                BossDefeatSushi(
+                    x=x + math.cos(angle) * spawn_r,
+                    y=y + math.sin(angle) * spawn_r * 0.82,
+                    vx=math.cos(angle) * speed,
+                    vy=math.sin(angle) * speed * rng.uniform(0.88, 1.04),
+                    enemy_type=rng.choice(self.ORBIT_SPRITE_TYPES),
+                    anim_offset=rng.randrange(0, self.ENEMY_SPRITE_FRAMES),
+                    anim_dir=rng.choice((-1, 1)),
+                    scale=max(0.78, min(1.72, scale)),
+                    depth=depth,
+                    delay=wave_delay + rng.randrange(0, 5),
+                )
+            )
+        self.boss_defeat_sushis = burst
+
+    def _spawn_boss_defeat_cheers(self, x: float, y: float, boss_scale: float) -> None:
+        rng = random.Random(self.frame_count * 131 + int(x * 7) + int(y * 11))
+        cheers: list[BossDefeatCheer] = []
+        angle_step = math.tau / self.BOSS_DEFEAT_CHEER_COUNT
+        delay_pool = [idx * 5 + rng.randrange(0, 4) for idx in range(self.BOSS_DEFEAT_CHEER_COUNT)]
+        rng.shuffle(delay_pool)
+        color_pool = (15, 10, 11, 14)
+        for idx in range(self.BOSS_DEFEAT_CHEER_COUNT):
+            angle = angle_step * idx + rng.uniform(-0.09, 0.09)
+            speed = rng.uniform(2.4, 4.6) * max(1.0, boss_scale * 0.74)
+            spawn_r = rng.uniform(2.0, 12.0)
+            text = self.BOSS_DEFEAT_CHEER_TEXTS[idx % len(self.BOSS_DEFEAT_CHEER_TEXTS)]
+            roll = rng.random()
+            if roll < 0.52:
+                scale = 0
+            elif roll < 0.90:
+                scale = 1
+            else:
+                scale = 2
+            cheers.append(
+                BossDefeatCheer(
+                    x=x + math.cos(angle) * spawn_r,
+                    y=y + math.sin(angle) * spawn_r * 0.82,
+                    vx=math.cos(angle) * speed,
+                    vy=math.sin(angle) * speed * rng.uniform(0.86, 1.02),
+                    text=text,
+                    color=color_pool[idx % len(color_pool)],
+                    shadow_color=1,
+                    scale=scale,
+                    delay=delay_pool[idx],
+                )
+            )
+        self.boss_defeat_cheers = cheers
+
+    def _update_boss_defeat_sushis(self) -> None:
+        if not self.boss_defeat_sushis:
+            return
+
+        updated: list[BossDefeatSushi] = []
+        for sushi in self.boss_defeat_sushis:
+            if not sushi.active:
+                continue
+            if sushi.delay > 0:
+                sushi.delay -= 1
+                updated.append(sushi)
+                continue
+
+            sushi.life += 1
+            sushi.x += sushi.vx
+            sushi.y += sushi.vy
+            sushi.vx *= 0.996
+            sushi.vy *= 0.996
+            if sushi.life > 4:
+                sushi.vy += 0.015
+
+            margin = 42
+            if (
+                sushi.x < -margin
+                or sushi.x > self.WIDTH + margin
+                or sushi.y < self.PLAY_TOP - margin
+                or sushi.y > self.HEIGHT + margin
+            ):
+                continue
+            updated.append(sushi)
+
+        self.boss_defeat_sushis = updated
+
+    def _update_boss_defeat_cheers(self) -> None:
+        if not self.boss_defeat_cheers:
+            return
+
+        updated: list[BossDefeatCheer] = []
+        for cheer in self.boss_defeat_cheers:
+            if not cheer.active:
+                continue
+            if cheer.delay > 0:
+                cheer.delay -= 1
+                updated.append(cheer)
+                continue
+
+            cheer.life += 1
+            cheer.x += cheer.vx
+            cheer.y += cheer.vy
+            cheer.vx *= 0.995
+            cheer.vy *= 0.995
+            if cheer.life > 5:
+                cheer.vy += 0.012
+
+            if (
+                cheer.x < -96
+                or cheer.x > self.WIDTH + 96
+                or cheer.y < self.PLAY_TOP - 48
+                or cheer.y > self.HEIGHT + 48
+            ):
+                continue
+            updated.append(cheer)
+
+        self.boss_defeat_cheers = updated
 
     def _laser_origin(self, boss: Boss) -> tuple[float, float]:
         return boss.x, boss.y + 4.0
@@ -3295,6 +4320,7 @@ class ShootGame:
 
         if self.phase == GamePhase.REWARD_SELECT:
             self.maybe_build_bomb_pattern_in_reward()
+            self.maybe_build_orbit_pattern_in_nonbattle()
             self._update_reward_select_input()
             return
 
@@ -3307,6 +4333,8 @@ class ShootGame:
         self._update_player_input()
         self._update_shooting()
         self._update_special_input()
+        self.update_orbit_sushi()
+        self.update_sushi_settle_effect()
 
         if self.boss_intro_timer > 0:
             self._update_boss_intro()
@@ -3345,6 +4373,7 @@ class ShootGame:
         self._handle_player_enemy_collisions()
         self._handle_player_boss_collisions()
         self._handle_player_enemy_bullet_collisions()
+        self.try_start_sushi_settlement()
 
         if self._boss_laser_hits_player():
             self._apply_player_damage(1, inflict_slow=self.boss_slow_inflict_enabled)
@@ -3372,8 +4401,12 @@ class ShootGame:
                 self._move_start_sub_weapon_selection(-1)
             elif self._start_bomb_power_focus_index() == self.start_menu_focus:
                 self._move_start_bomb_power_selection(-1)
+            elif self._start_laser_count_focus_index() == self.start_menu_focus:
+                self._move_start_laser_count_selection(-1)
             elif self._start_fever_focus_index() == self.start_menu_focus:
                 self._toggle_start_fever()
+            elif self._start_prefever_focus_index() == self.start_menu_focus:
+                self._toggle_start_prefever()
             elif self._start_boss_pattern_focus_index() == self.start_menu_focus:
                 self._move_start_boss_pattern_selection(-1)
         elif pyxel.btnp(pyxel.KEY_RIGHT):
@@ -3385,8 +4418,12 @@ class ShootGame:
                 self._move_start_sub_weapon_selection(1)
             elif self._start_bomb_power_focus_index() == self.start_menu_focus:
                 self._move_start_bomb_power_selection(1)
+            elif self._start_laser_count_focus_index() == self.start_menu_focus:
+                self._move_start_laser_count_selection(1)
             elif self._start_fever_focus_index() == self.start_menu_focus:
                 self._toggle_start_fever()
+            elif self._start_prefever_focus_index() == self.start_menu_focus:
+                self._toggle_start_prefever()
             elif self._start_boss_pattern_focus_index() == self.start_menu_focus:
                 self._move_start_boss_pattern_selection(1)
 
@@ -3404,8 +4441,10 @@ class ShootGame:
             weapon_selector_y = selector_y + 64
             sub_weapon_selector_y = weapon_selector_y + (64 if self._start_sub_weapon_menu_enabled() else 0)
             bomb_power_selector_y = sub_weapon_selector_y + 64
-            fever_selector_y = bomb_power_selector_y + (64 if self.START_DEBUG_BOMB_POWER_MENU else 0)
-            debug_selector_y = fever_selector_y + (64 if self.START_DEBUG_FEVER_MENU else 0)
+            laser_count_selector_y = bomb_power_selector_y + (64 if self.START_DEBUG_BOMB_POWER_MENU else 0)
+            fever_selector_y = laser_count_selector_y + (64 if self.START_DEBUG_LASER_COUNT_MENU else 0)
+            prefever_selector_y = fever_selector_y + (64 if self.START_DEBUG_FEVER_MENU else 0)
+            debug_selector_y = prefever_selector_y + (64 if self.START_DEBUG_PREFEVER_MENU else 0)
 
             start_box_w = 280
             start_box_h = 34
@@ -3446,10 +4485,24 @@ class ShootGame:
                     self.start_menu_focus = self._start_bomb_power_focus_index() or 2
                     self._move_start_bomb_power_selection(1)
                     return
+            if self.START_DEBUG_LASER_COUNT_MENU:
+                if self._point_in_rect(mx, my, selector_x, laser_count_selector_y, selector_w * 0.5, selector_h):
+                    self.start_menu_focus = self._start_laser_count_focus_index() or 2
+                    self._move_start_laser_count_selection(-1)
+                    return
+                if self._point_in_rect(mx, my, selector_x + selector_w * 0.5, laser_count_selector_y, selector_w * 0.5, selector_h):
+                    self.start_menu_focus = self._start_laser_count_focus_index() or 2
+                    self._move_start_laser_count_selection(1)
+                    return
             if self.START_DEBUG_FEVER_MENU:
                 if self._point_in_rect(mx, my, selector_x, fever_selector_y, selector_w, selector_h):
                     self.start_menu_focus = self._start_fever_focus_index() or 2
                     self._toggle_start_fever()
+                    return
+            if self.START_DEBUG_PREFEVER_MENU:
+                if self._point_in_rect(mx, my, selector_x, prefever_selector_y, selector_w, selector_h):
+                    self.start_menu_focus = self._start_prefever_focus_index() or 2
+                    self._toggle_start_prefever()
                     return
             if self.START_DEBUG_BOSS_PATTERN_MENU:
                 if self._point_in_rect(mx, my, selector_x, debug_selector_y, selector_w * 0.5, selector_h):
@@ -3580,8 +4633,8 @@ class ShootGame:
         self.fireworks = [fw for fw in self.fireworks if not fw.is_dead()]
 
     def _update_player_input(self) -> None:
-        left_bound = self.SIDE_MARGIN
-        right_bound = self.WIDTH - self.SIDE_MARGIN
+        left_bound = -self.PLAYER_EDGE_OVERHANG_X
+        right_bound = self.WIDTH + self.PLAYER_EDGE_OVERHANG_X
         top_bound = self.PLAYER_MIN_Y
         bottom_bound = self.PLAYER_MAX_Y
         move_factor = self.player_slow_factor if self.player_slow_timer > 0 else 1.0
@@ -3659,29 +4712,45 @@ class ShootGame:
     def _try_activate_homing_laser(self) -> None:
         if self.laser_cooldown > 0:
             return
-        if len(self.homing_lasers) >= self.laser_active_limit:
+        if len(self.homing_lasers) + self.laser_shot_count > self.laser_active_limit:
             return
 
         laser_speed = 9.3
-        laser_x = float(self.player.x)
         laser_y = float(self.player.y - self.PLAYER_HALF_H - 10)
+        count = max(self.LASER_SHOT_COUNT_MIN, min(self.LASER_SHOT_COUNT_MAX, self.laser_shot_count))
+        if count == 1:
+            offsets = [(0.0, 0.0)]
+            speed_bonuses = [0.0]
+        elif count == 2:
+            offsets = [(-12.0, -45.0), (12.0, 45.0)]
+            speed_bonuses = [1.0, 2.0]
+        else:
+            offsets = [(-14.0, -55.0), (0.0, 0.0), (14.0, 55.0)]
+            speed_bonuses = [2.0, 3.0, 5.0]
 
-        self.homing_lasers.append(
-            HomingLaser(
-                x=laser_x,
-                y=laser_y,
-                vx=0.0,
-                vy=-laser_speed,
-                speed=laser_speed,
-                turn_rate=0.052,
-                life=180,
-                max_life=180,
-                radius=7,
-                band_width=5,
-                damage=2,
-                trail=[(laser_x, laser_y)],
+        if len(speed_bonuses) > 1:
+            speed_bonuses = random.sample(speed_bonuses, len(speed_bonuses))
+
+        for (xoff, angle_from_up_deg), speed_bonus in zip(offsets, speed_bonuses):
+            laser_x = float(self.player.x + xoff)
+            shot_speed = laser_speed + speed_bonus
+            shot_angle = (-math.pi / 2.0) + math.radians(angle_from_up_deg)
+            self.homing_lasers.append(
+                HomingLaser(
+                    x=laser_x,
+                    y=laser_y,
+                    vx=math.cos(shot_angle) * shot_speed,
+                    vy=math.sin(shot_angle) * shot_speed,
+                    speed=shot_speed,
+                    turn_rate=0.052,
+                    life=180,
+                    max_life=180,
+                    radius=7,
+                    band_width=5,
+                    damage=2,
+                    trail=[(laser_x, laser_y)],
+                )
             )
-        )
         self.audio.play_se("laser_fire")
         self.laser_cooldown = self.laser_cooldown_frames
 
@@ -3780,9 +4849,6 @@ class ShootGame:
         eased = 1.0 - ((1.0 - progress) ** 3)
         return bomb.radius + bomb.expansion * eased
 
-    def _bomb_burst_cancel_radius(self, bomb: BombField) -> float:
-        return (bomb.radius + bomb.expansion * 0.92) * 0.92
-
     def _update_bombs(self) -> None:
         for bomb in self.bombs:
             if not bomb.active:
@@ -3800,11 +4866,6 @@ class ShootGame:
                     bomb.rotation = 0.0
                     self.audio.play_se("bomb_burst")
                     self.spawn_bomb_visual(bomb.x, bomb.y, self._bomb_power_scale(bomb.power_level))
-                    self._cancel_enemy_bullets_by_circle(
-                        bomb.x,
-                        bomb.y,
-                        self._bomb_burst_cancel_radius(bomb),
-                    )
 
                 continue
 
@@ -4350,6 +5411,7 @@ class ShootGame:
         if enemy.hp <= 0:
             self.score += enemy.score_value
             self.enemy_kill_count += 1
+            self.add_orbit_sushi(enemy)
             self.audio.play_se(self._enemy_destroy_sound_name(enemy.enemy_type))
             self._spawn_enemy_burst(enemy.x, enemy.y, scale=self._enemy_burst_scale_from_enemy(enemy))
             if enemy.enemy_type == "rare":
@@ -4569,6 +5631,8 @@ class ShootGame:
     def _apply_player_damage(self, damage: int, inflict_slow: bool = False) -> None:
         if self.player.invincible_timer > 0:
             return
+        if self.consume_barrier_if_possible():
+            return
         if self._fever_active() and self.boss_buff_state.fever_barrier_hits > 0:
             self.boss_buff_state.fever_barrier_hits -= 1
             self.player.invincible_timer = max(self.player.invincible_timer, 18)
@@ -4641,10 +5705,11 @@ class ShootGame:
         self._draw_homing_lasers()
         self._draw_boss_hp_bar()
         self._draw_effects()
-        self._draw_player()
+        self._draw_player_orbit_layer()
+        self._draw_sushi_settle_message()
+        self._draw_boss_pattern_label()
         self._draw_hud()
         self._draw_reward_notice()
-        self._draw_boss_pattern_label()
         self._draw_mobile_controls()
 
         if self.boss_intro_timer > 0:
@@ -5119,7 +6184,7 @@ class ShootGame:
         draw_big_text(title_x, label_y - 10, title, 2, 1 if pressed else text, shadow_color=1)
 
     def _draw_mobile_laser_button(self) -> None:
-        ready = self.laser_cooldown <= 0 and len(self.homing_lasers) < self.laser_active_limit
+        ready = self.laser_cooldown <= 0 and len(self.homing_lasers) + self.laser_shot_count <= self.laser_active_limit
         pressed = self._is_mobile_laser_pressed()
         x, y, w, h = self._mobile_laser_button_rect()
 
@@ -5180,17 +6245,281 @@ class ShootGame:
             text=text,
         )
 
-    def _draw_player(self) -> None:
+    def _draw_orbit_sushi(
+        self,
+        x: float,
+        y: float,
+        *,
+        enemy_type: str,
+        anim_offset: int,
+        anim_dir: int,
+        display_scale: float,
+        sample_scale: float = 1.0,
+        brightness_rank: int = 1,
+        glow: bool = False,
+        render_scale: float = 1.0,
+    ) -> None:
+        scale = min(1.125, max(0.82, 0.92 + (sample_scale - 0.9) * 0.40)) * render_scale
+
+        if glow and (self.frame_count // 3) % 2 == 0:
+            pyxel.circb(int(round(x)), int(round(y)), max(4, int(8 * scale)), 10)
+        elif brightness_rank >= 2:
+            pyxel.circb(int(round(x)), int(round(y)), max(3, int(7 * scale)), 7)
+        elif brightness_rank <= 0:
+            pyxel.circb(int(round(x)), int(round(y)), max(3, int(6 * scale)), 5)
+
+        self._draw_orbit_enemy_sprite(
+            x,
+            y,
+            enemy_type=enemy_type,
+            anim_offset=anim_offset,
+            anim_dir=anim_dir,
+            scale=scale,
+        )
+
+    def _draw_settle_sparkle_layer(self, *, front: bool) -> None:
+        effect = self.sushi_settle_effect
+        if not effect.active or not effect.sushis:
+            return
+        if effect.phase >= self.SETTLE_PHASE_FINISH:
+            return
+        sheet = self.settle_sparkle_front_sheet_image if front else self.settle_sparkle_back_sheet_image
+        if sheet is None:
+            return
+        elapsed = self._settle_total_elapsed_frames(effect)
+        total_frames = (
+            self.SETTLE_ALIGN_FRAMES
+            + self.SETTLE_GLOW_FRAMES
+            + self.SETTLE_STOP_FRAMES
+            + self.SETTLE_BOUNCE_FRAMES
+            + self.SETTLE_SHAKE_FRAMES
+            + self.SETTLE_EXPLODE_FRAMES
+        )
+        frame = min(max(0, elapsed), max(0, total_frames - 1))
+        cell_x = (frame % self.settle_sparkle_sheet_cols) * self.settle_sparkle_frame_w
+        cell_y = (frame // self.settle_sparkle_sheet_cols) * self.settle_sparkle_frame_h
+        draw_x = int(round(effect.center_x - self.settle_sparkle_frame_w / 2))
+        draw_y = int(round(effect.center_y - self.settle_sparkle_frame_h / 2))
+        pyxel.blt(
+            draw_x,
+            draw_y,
+            sheet,
+            cell_x,
+            cell_y,
+            self.settle_sparkle_frame_w,
+            self.settle_sparkle_frame_h,
+            0,
+        )
+
+    def _collect_player_orbit_draw_items(self) -> list[DrawItem]:
+        items: list[DrawItem] = []
+
+        for sample, draw_x, draw_y, sparkle_idx in self._orbit_shell_sparkle_states():
+            items.append(
+                DrawItem(
+                    layer_group=1,
+                    depth=sample.depth,
+                    kind="orbit_shell_sparkle",
+                    x=draw_x,
+                    y=draw_y,
+                    payload=(sample, sparkle_idx),
+                )
+            )
+
+        for entry, sample, draw_x, draw_y in self._orbit_render_states(self.orbit_sushi_queue):
+            items.append(
+                DrawItem(
+                    layer_group=1,
+                    depth=sample.depth,
+                    kind="orbit_sushi",
+                    x=draw_x,
+                    y=draw_y,
+                    payload=(entry, sample),
+                )
+            )
+
+        items.append(
+            DrawItem(
+                layer_group=1,
+                depth=0.0,
+                kind="player",
+                x=self.player.x,
+                y=self.player.y,
+            )
+        )
+
+        if self.barrier_stock > 0 or (self._fever_active() and self.boss_buff_state.fever_barrier_hits > 0):
+            items.append(
+                DrawItem(
+                    layer_group=1,
+                    depth=0.05,
+                    kind="barrier",
+                    x=self.player.x,
+                    y=self.player.y,
+                )
+            )
+
+        effect = self.sushi_settle_effect
+        if effect.active and effect.sushis:
+            glow = effect.phase == self.SETTLE_PHASE_GLOW
+            for sushi in effect.sushis:
+                items.append(
+                    DrawItem(
+                        layer_group=1,
+                        depth=0.18,
+                        kind="settle_sushi",
+                        x=sushi.current_x + sushi.offset_x,
+                        y=sushi.current_y + sushi.offset_y,
+                        payload=(sushi, glow),
+                    )
+                )
+
+        items.sort(key=lambda item: (item.layer_group, item.depth))
+        return items
+
+    def _draw_player_orbit_layer(self) -> None:
+        self._draw_settle_sparkle_layer(front=False)
+        fever_orbit_shell = self._fever_active()
+        for item in self._collect_player_orbit_draw_items():
+            if item.kind == "orbit_shell_sparkle":
+                if not fever_orbit_shell:
+                    continue
+                sample, sparkle_idx = item.payload
+                self._draw_orbit_shell_sparkle(
+                    item.x,
+                    item.y,
+                    brightness_rank=sample.brightness_rank,
+                    sparkle_idx=sparkle_idx,
+                )
+            elif item.kind == "orbit_sushi":
+                entry, sample = item.payload
+                self._draw_orbit_sushi(
+                    item.x,
+                    item.y,
+                    enemy_type=entry.enemy_type,
+                    anim_offset=entry.anim_offset,
+                    anim_dir=entry.anim_dir,
+                    display_scale=entry.display_scale,
+                    sample_scale=sample.scale,
+                    brightness_rank=sample.brightness_rank,
+                )
+            elif item.kind == "settle_sushi":
+                settling_sushi, glow = item.payload
+                self._draw_orbit_sushi(
+                    item.x,
+                    item.y,
+                    enemy_type=settling_sushi.enemy_type,
+                    anim_offset=settling_sushi.anim_offset,
+                    anim_dir=settling_sushi.anim_dir,
+                    display_scale=settling_sushi.display_scale,
+                    sample_scale=1.0,
+                    brightness_rank=2,
+                    glow=glow,
+                    render_scale=1.125,
+                )
+            elif item.kind == "barrier":
+                self._draw_player_barrier(int(round(item.x)), int(round(item.y)))
+            elif item.kind == "player":
+                self._draw_player(int(round(item.x)), int(round(item.y)))
+        self._draw_settle_sparkle_layer(front=True)
+
+    def _draw_orbit_shell_sparkle(self, x: float, y: float, *, brightness_rank: int, sparkle_idx: int) -> None:
+        src = pyxel.image(self.SETTLE_SPARKLE_BANK)
+        frame = ((self.frame_count // 2) + sparkle_idx) % self.SETTLE_SPARKLE_FRAMES
+        src_u = self.SETTLE_SPARKLE_U
+        src_v = self.SETTLE_SPARKLE_V + frame * self.SETTLE_SPARKLE_SIZE
+        scale = self.ORBIT_SHELL_SPARKLE_SCALE
+        vx = x - self.player.x
+        vy = y - self.player.y
+        length = math.sqrt(vx * vx + vy * vy)
+        if length > 1e-6:
+            x += (vx / length) * self.ORBIT_SHELL_SPARKLE_DRAW_OFFSET
+            y += (vy / length) * self.ORBIT_SHELL_SPARKLE_DRAW_OFFSET
+        x += self.ORBIT_SHELL_SPARKLE_DRAW_X_OFFSET
+        y += self.ORBIT_SHELL_SPARKLE_DRAW_Y_OFFSET
+        draw_w = self.SETTLE_SPARKLE_SIZE * scale
+        draw_h = self.SETTLE_SPARKLE_SIZE * scale
+        draw_x = int(round(x - draw_w / 2))
+        draw_y = int(round(y - draw_h / 2))
+        if brightness_rank >= 2:
+            pyxel.pset(int(round(x)), int(round(y)), 7)
+        elif brightness_rank <= 0:
+            pyxel.pset(int(round(x)), int(round(y)), 5)
+        pyxel.blt(
+            draw_x,
+            draw_y,
+            src,
+            src_u,
+            src_v,
+            self.SETTLE_SPARKLE_SIZE,
+            self.SETTLE_SPARKLE_SIZE,
+            self.SETTLE_SPARKLE_COLKEY,
+            0.0,
+            scale,
+        )
+
+    def _draw_sushi_settle_message(self) -> None:
+        effect = self.sushi_settle_effect
+        if not effect.active or not effect.sushis:
+            return
+        if effect.phase < self.SETTLE_PHASE_GLOW or effect.phase >= self.SETTLE_PHASE_FINISH:
+            return
+
+        cx = int(round(effect.center_x)) + 3
+        cy = int(round(effect.center_y))
+        main_text = "ARIGATO!!"
+        sub_text = "BONUS SCORE" if self.barrier_stock >= self.BARRIER_STOCK_CAP else "BARRIER+1"
+
+        main_scale = 1
+        sub_scale = 1
+        main_w = big_text_width(main_text, main_scale)
+        sub_w = big_text_width(sub_text, sub_scale)
+        main_x = cx - main_w // 2 - 3
+        sub_x = cx - sub_w // 2 - 3
+        if sub_text == "BONUS SCORE":
+            sub_x -= 6
+
+        main_color = 15 if (self.frame_count // 2) % 2 == 0 else 10
+        sub_color = 7 if (self.frame_count // 3) % 2 == 0 else 12
+
+        def draw_main_with_bold_exclaim(x: int, y: int, color: int) -> None:
+            word_text = "ARIGATO"
+            exclaim_text = "!!"
+            word_x = x
+            exclaim_x = x + len(word_text) * 6 * main_scale
+            draw_big_text(word_x, y, word_text, main_scale, color, shadow_color=1)
+            draw_big_text(exclaim_x, y, exclaim_text, main_scale, color, shadow_color=1)
+            draw_big_text(exclaim_x + 1, y, exclaim_text, main_scale, color, shadow_color=1)
+
+        if effect.phase in {self.SETTLE_PHASE_GLOW, self.SETTLE_PHASE_STOP, self.SETTLE_PHASE_BOUNCE}:
+            draw_main_with_bold_exclaim(main_x, cy - 7, main_color)
+            if (self.frame_count // 2) % 2 == 0:
+                draw_big_text(sub_x, cy + 3, sub_text, sub_scale, sub_color, shadow_color=1)
+        elif effect.phase in {self.SETTLE_PHASE_SHAKE, self.SETTLE_PHASE_EXPLODE}:
+            if (self.frame_count // 2) % 2 == 0:
+                draw_main_with_bold_exclaim(main_x, cy - 7, main_color)
+            if (self.frame_count // 3) % 2 == 0:
+                draw_big_text(sub_x, cy + 3, sub_text, sub_scale, sub_color, shadow_color=1)
+
+    def _draw_player_barrier(self, x: int, y: int) -> None:
+        if self.barrier_stock > 0:
+            barrier_color = 11 if (self.frame_count // 6) % 2 == 0 else 7
+            pyxel.circb(x, y - 1, 14, barrier_color)
+            pyxel.circb(x, y - 1, 16, 5)
+            for idx in range(min(3, self.barrier_stock)):
+                pyxel.circ(x - 10 + idx * 10, y - 18, 2, 10)
+        if self._fever_active() and self.boss_buff_state.fever_barrier_hits > 0:
+            fever_color = 10 if (self.frame_count // 4) % 2 == 0 else 7
+            pyxel.circb(x, y - 1, 18, fever_color)
+            pyxel.circb(x, y - 1, 20, 13)
+
+    def _draw_player(self, x: int | None = None, y: int | None = None) -> None:
         blink = True if self.phase == GamePhase.START else (not self.player.is_hit or (self.frame_count // 3) % 2 == 0)
         if not blink:
             return
 
-        x = int(self.player.x)
-        y = int(self.player.y)
-        if self._fever_active() and self.boss_buff_state.fever_barrier_hits > 0:
-            barrier_color = 10 if (self.frame_count // 4) % 2 == 0 else 7
-            pyxel.circb(x, y - 1, 15, barrier_color)
-            pyxel.circb(x, y - 1, 18, 13)
+        x = int(self.player.x if x is None else x)
+        y = int(self.player.y if y is None else y)
         engine_flicker = (self.frame_count // 2) % 3
         flame_len = 4 + (1 if engine_flicker == 0 else 0)
         wing_tip_color = 12 if engine_flicker == 1 else 6
@@ -5576,8 +6905,10 @@ class ShootGame:
 
         if enemy.enemy_type == "rare":
             pulse = 8 if (self.frame_count // 4) % 2 == 0 else 10
-            pyxel.circb(int(enemy.x), int(enemy.y), max(8, int(11 * enemy.display_scale)), pulse)
-            pyxel.circb(int(enemy.x), int(enemy.y), max(10, int(14 * enemy.display_scale)), 7)
+            rare_cx = int(enemy.x) - 5
+            rare_cy = int(enemy.y - max(1, round(2 * enemy.display_scale)))
+            pyxel.circb(rare_cx, rare_cy, max(8, int(11 * enemy.display_scale)), pulse)
+            pyxel.circb(rare_cx, rare_cy, max(10, int(14 * enemy.display_scale)), 7)
 
         pyxel.blt(
             x, y,
@@ -5618,7 +6949,7 @@ class ShootGame:
 
         boss = self.boss
 
-        frame = ((self.frame_count // 4) * boss.anim_dir) % self.BOSS_SPRITE_FRAMES
+        frame = ((self.frame_count // 3) * boss.anim_dir) % self.BOSS_SPRITE_FRAMES
         u = self.BOSS_SPRITE_U
         v = self.BOSS_SPRITE_V + frame * self.BOSS_SPRITE_H
 
@@ -5642,7 +6973,7 @@ class ShootGame:
 
         if getattr(boss, "entry_invulnerable", False):
             aura_r = int(max(draw_w, draw_h) * 0.78)
-            aura_color = 12 if (self.frame_count // 4) % 2 == 0 else 7
+            aura_color = 12 if (self.frame_count // 3) % 2 == 0 else 7
             pyxel.circb(aura_cx, aura_cy, aura_r, aura_color)
             pyxel.circb(aura_cx, aura_cy, max(14, aura_r - 6), 6)
             pyxel.circb(aura_cx, aura_cy, max(10, aura_r - 12), 7)
@@ -5691,6 +7022,9 @@ class ShootGame:
                 py = int(cy + math.sin(angle) * outer_r * 0.78)
                 pyxel.pset(px, py, 10 if idx % 2 == 0 else 7)
 
+        self._draw_boss_defeat_sushis()
+        self._draw_boss_defeat_cheers()
+
         confetti_ratio = 0.0
         if self.BOSS_DEFEAT_CONFETTI_FRAMES > 0:
             confetti_ratio = self.boss_defeat_confetti_timer / self.BOSS_DEFEAT_CONFETTI_FRAMES
@@ -5738,6 +7072,54 @@ class ShootGame:
             pyxel.pset(px + 1, py, 7)
             pyxel.pset(px, py - 1, 7)
             pyxel.pset(px, py + 1, 7)
+
+    def _draw_boss_defeat_sushis(self) -> None:
+        if not self.boss_defeat_sushis:
+            return
+
+        for sushi in sorted(self.boss_defeat_sushis, key=lambda item: (item.depth, item.scale)):
+            if sushi.delay > 0:
+                continue
+            if sushi.depth <= -0.08:
+                pyxel.circb(int(round(sushi.x)), int(round(sushi.y)), max(4, int(7 * sushi.scale)), 5)
+            elif sushi.depth >= 0.20:
+                pyxel.circb(int(round(sushi.x)), int(round(sushi.y)), max(4, int(8 * sushi.scale)), 7)
+            self._draw_orbit_enemy_sprite(
+                sushi.x,
+                sushi.y,
+                enemy_type=sushi.enemy_type,
+                anim_offset=sushi.anim_offset,
+                anim_dir=sushi.anim_dir,
+                scale=sushi.scale,
+            )
+
+    def _draw_boss_defeat_cheers(self) -> None:
+        if not self.boss_defeat_cheers:
+            return
+
+        for cheer in self.boss_defeat_cheers:
+            if cheer.delay > 0:
+                continue
+            if cheer.scale <= 0:
+                text_w = hud_value_text_width(cheer.text)
+                text_h = 7
+            else:
+                text_w = big_text_width(cheer.text, cheer.scale)
+                text_h = 7 * cheer.scale
+            text_x = int(round(cheer.x)) - text_w // 2
+            text_y = int(round(cheer.y)) - text_h // 2
+            pulse_color = cheer.color if (self.frame_count // 2) % 2 == 0 else 15
+            if cheer.scale <= 0:
+                draw_hud_value_text(text_x, text_y, cheer.text, pulse_color, shadow_color=cheer.shadow_color)
+            else:
+                draw_big_text(
+                    text_x,
+                    text_y,
+                    cheer.text,
+                    cheer.scale,
+                    pulse_color,
+                    shadow_color=cheer.shadow_color,
+                )
 
     def _draw_boss_hp_bar(self) -> None:
         if self.boss is None and self.boss_hp_trail <= 0:
@@ -5884,12 +7266,11 @@ class ShootGame:
         bomb_value_color = 7 if self.bomb_restock_flash_timer <= 0 else 10
         laser_text_color = 7
 
-        laser_status = "READY" if self.laser_cooldown <= 0 else f"WAIT{self.laser_cooldown:02d}"
         draw_big_text(left_x, info_row2_y + 3, "LASER", 1, 15, shadow_color=1)
         draw_hud_value_text(
             left_value_x,
             info_row2_y + 4,
-            f"X {laser_status} {len(self.homing_lasers)}/{self.laser_active_limit}",
+            f"X {self.laser_shot_count}",
             laser_text_color,
             shadow_color=1,
         )
@@ -5972,6 +7353,11 @@ class ShootGame:
         text_x = box_x + (box_w - big_text_width(label, 1)) // 2
         draw_big_text(text_x, y + 4, label, 1, label_color, shadow_color=1)
         meter_x = box_x + box_w + 8
+        if self._fever_active() and active and family is not None:
+            fever_text = "FEVER MAX!!"
+            fever_color = 10 if (self.frame_count // 5) % 2 == 0 else 8
+            draw_big_text(meter_x, y + 3, fever_text, 1, fever_color, shadow_color=1)
+            return
         self._draw_weapon_level_meter(meter_x, y + 2, family, active=active)
 
     def _draw_boss_buff_ui(self, x: int, y: int) -> None:
@@ -5990,11 +7376,13 @@ class ShootGame:
                 pyxel.line(bx + 2, y + 14, bx + 17, y + 14, 15)
 
     def _draw_overload_ui(self, x: int, y: int) -> None:
-        if not self.boss_buff_state.overload_active:
+        if self.boss_buff_state.overload_active:
+            color = 8 if (self.frame_count // 5) % 2 == 0 else 10
+            draw_big_text(x, y, "FEVER x2", 2, color, shadow_color=1)
             return
-        color = 8 if (self.frame_count // 5) % 2 == 0 else 10
-        draw_big_text(x, y, "FEVER x2", 2, color, shadow_color=1)
-        draw_big_text(x + 114, y, f"B{self.boss_buff_state.fever_barrier_hits}", 2, 7, shadow_color=1)
+        if self.barrier_stock > 0:
+            draw_big_text(x, y + 3, "BARRIER", 1, 11, shadow_color=1)
+            draw_big_text(x + 60, y, str(self.barrier_stock), 2, 7, shadow_color=1)
 
     def _draw_reward_notice(self) -> None:
         if self.reward_notice_timer <= 0 or self.phase != GamePhase.PLAYING:
@@ -6256,8 +7644,8 @@ class ShootGame:
             desc_color = 12 if selected else 7
             tag_x = box_x + self.REWARD_BOX_W - 82
 
-            draw_big_text(box_x + 40, box_y + 18, choice.title, 2, title_color, shadow_color=1)
-            draw_big_text(box_x + 40, box_y + 52, choice.description, 1, desc_color, shadow_color=1)
+            draw_big_text(box_x + 40, box_y + 14, choice.title, 2, title_color, shadow_color=1)
+            draw_big_text(box_x + 40, box_y + 42, choice.description, 1, desc_color, shadow_color=1)
             pyxel.rect(tag_x, box_y + 10, 68, 14, 1 if selected else 0)
             pyxel.rectb(tag_x, box_y + 10, 68, 14, choice.accent_color)
             pyxel.text(tag_x + 10, box_y + 14, choice.tag, 7 if selected else choice.accent_color)
@@ -6279,9 +7667,39 @@ class ShootGame:
                     pyxel.rect(gx, gy, cell, cell, 1)
 
         if self._dual_shot_ready():
-            title = "CHOOSE DUAL WEAPON"
-            title_x = (self.WIDTH - big_text_width(title, 1)) // 2
-            draw_big_text(title_x, self.HEIGHT - 104, title, 1, 10, shadow_color=1)
+            title_words = ("CHOOSE", "DUAL", "WEAPON")
+            title_char_gap = 7
+            title_word_gap = 8
+            title_widths = [
+                scaled_text_width(word, 1, advance_x=title_char_gap)
+                for word in title_words
+            ]
+            title_total_w = sum(title_widths) + title_word_gap * (len(title_words) - 1)
+            title_x = (self.WIDTH - title_total_w) // 2 - 3
+            title_y = self.HEIGHT - 107
+
+            cursor_x = title_x
+            for word, word_w in zip(title_words, title_widths):
+                draw_scaled_text(
+                    cursor_x,
+                    title_y,
+                    word,
+                    1,
+                    1,
+                    10,
+                    shadow_color=1,
+                    advance_x=title_char_gap,
+                )
+                draw_scaled_text(
+                    cursor_x + 1,
+                    title_y,
+                    word,
+                    1,
+                    1,
+                    10,
+                    advance_x=title_char_gap,
+                )
+                cursor_x += word_w + title_word_gap
 
             selected_slots = [
                 slot
@@ -6370,8 +7788,10 @@ class ShootGame:
         weapon_selector_y = selector_y + 64
         sub_weapon_selector_y = weapon_selector_y + (64 if self._start_sub_weapon_menu_enabled() else 0)
         bomb_power_selector_y = sub_weapon_selector_y + 64
-        fever_selector_y = bomb_power_selector_y + (64 if self.START_DEBUG_BOMB_POWER_MENU else 0)
-        debug_selector_y = fever_selector_y + (64 if self.START_DEBUG_FEVER_MENU else 0)
+        laser_count_selector_y = bomb_power_selector_y + (64 if self.START_DEBUG_BOMB_POWER_MENU else 0)
+        fever_selector_y = laser_count_selector_y + (64 if self.START_DEBUG_LASER_COUNT_MENU else 0)
+        prefever_selector_y = fever_selector_y + (64 if self.START_DEBUG_FEVER_MENU else 0)
+        debug_selector_y = prefever_selector_y + (64 if self.START_DEBUG_PREFEVER_MENU else 0)
 
         start_box_w = 280
         start_box_h = 34
@@ -6387,9 +7807,15 @@ class ShootGame:
         bomb_power_label = self._start_bomb_power_label()
         bomb_power_accent = self._start_bomb_power_accent()
         bomb_power_border = bomb_power_accent if self.start_menu_focus == self._start_bomb_power_focus_index() else 6
+        laser_count_label = self._start_laser_count_label()
+        laser_count_accent = self._start_laser_count_accent()
+        laser_count_border = laser_count_accent if self.start_menu_focus == self._start_laser_count_focus_index() else 6
         fever_label = "ON" if self.start_fever_enabled else "OFF"
         fever_accent = 10 if self.start_fever_enabled else 5
         fever_border = fever_accent if self.start_menu_focus == self._start_fever_focus_index() else 6
+        prefever_label = "ON" if self.start_prefever_enabled else "OFF"
+        prefever_accent = 11 if self.start_prefever_enabled else 5
+        prefever_border = prefever_accent if self.start_menu_focus == self._start_prefever_focus_index() else 6
         debug_pattern = self._start_boss_pattern_label()
         debug_accent = self._start_boss_pattern_accent()
         debug_focus_index = self._start_boss_pattern_focus_index() or 2
@@ -6456,6 +7882,21 @@ class ShootGame:
             bomb_power_x = (self.WIDTH - big_text_width(bomb_power_label, theme_scale)) // 2
             draw_big_text(bomb_power_x, bomb_power_selector_y + 18, bomb_power_label, theme_scale, bomb_power_accent, shadow_color=1)
 
+        if self.START_DEBUG_LASER_COUNT_MENU:
+            pyxel.rect(selector_x, laser_count_selector_y, selector_w, selector_h, 1)
+            pyxel.rectb(selector_x, laser_count_selector_y, selector_w, selector_h, laser_count_border)
+            pyxel.rectb(selector_x + 2, laser_count_selector_y + 2, selector_w - 4, selector_h - 4, laser_count_accent)
+
+            pyxel.text(selector_x + 10, laser_count_selector_y + 8, "DEBUG LASER COUNT", 12)
+            pyxel.text(selector_x + 10, laser_count_selector_y + 42, "SET START LASER SHOT COUNT", 7)
+
+            arrow_y = laser_count_selector_y + 20
+            self._draw_selector_arrow(selector_x + 12, arrow_y, -1, laser_count_accent)
+            self._draw_selector_arrow(selector_x + selector_w - 22, arrow_y, 1, laser_count_accent)
+
+            laser_count_x = (self.WIDTH - big_text_width(laser_count_label, theme_scale)) // 2
+            draw_big_text(laser_count_x, laser_count_selector_y + 18, laser_count_label, theme_scale, laser_count_accent, shadow_color=1)
+
         if self.START_DEBUG_FEVER_MENU:
             pyxel.rect(selector_x, fever_selector_y, selector_w, selector_h, 1)
             pyxel.rectb(selector_x, fever_selector_y, selector_w, selector_h, fever_border)
@@ -6466,6 +7907,17 @@ class ShootGame:
 
             fever_x = (self.WIDTH - big_text_width(fever_label, theme_scale)) // 2
             draw_big_text(fever_x, fever_selector_y + 18, fever_label, theme_scale, fever_accent if self.start_fever_enabled else 13, shadow_color=1)
+
+        if self.START_DEBUG_PREFEVER_MENU:
+            pyxel.rect(selector_x, prefever_selector_y, selector_w, selector_h, 1)
+            pyxel.rectb(selector_x, prefever_selector_y, selector_w, selector_h, prefever_border)
+            pyxel.rectb(selector_x + 2, prefever_selector_y + 2, selector_w - 4, selector_h - 4, prefever_accent)
+
+            pyxel.text(selector_x + 10, prefever_selector_y + 8, "DEBUG PRE-FEVER", 12)
+            pyxel.text(selector_x + 10, prefever_selector_y + 42, "START AT LOOP 5 WITH 4 BUFFS", 7)
+
+            prefever_x = (self.WIDTH - big_text_width(prefever_label, theme_scale)) // 2
+            draw_big_text(prefever_x, prefever_selector_y + 18, prefever_label, theme_scale, prefever_accent if self.start_prefever_enabled else 13, shadow_color=1)
 
         if self.START_DEBUG_BOSS_PATTERN_MENU:
             pyxel.rect(selector_x, debug_selector_y, selector_w, selector_h, 1)
