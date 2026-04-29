@@ -1,0 +1,16 @@
+# ===== LLM OPS =====
+artifacts/
+**/*.bak.*
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+# macOS
+.DS_Store
+
+# Local analysis / LLM context artifacts
+.kuchinawa/
+ContextPack.txt
+*ContextPack*.txt
