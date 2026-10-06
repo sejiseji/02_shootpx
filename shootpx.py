@@ -9,6 +9,7 @@ import pyxel
 from audio_system import AudioSystem
 from bitmap_font import (
     big_text_width,
+    clear_text_cache,
     draw_big_text,
     draw_hud_value_text,
     draw_scaled_text,
@@ -53,6 +54,7 @@ from game_models import (
     SushiSettleEffect,
     WasabiItem,
     WeaponItem,
+    SushiEnemySet,
 )
 from quaternion_utils import normalize_vector, quaternion_from_axis_angle, rotate_vector_by_quaternion
 
@@ -241,6 +243,12 @@ class ShootGame:
     TEA_DROP_BONUS_STEP = 0.03
     HOMING_LASER_DROP_BONUS = 0.025
     WEAPON_ITEM_SWITCH_LOCK_FRAMES = 72
+    WEAPON_ITEM_REACTION_FRAMES = 8
+    SUSHI_SET_MAX_ACTIVE = 2
+    SUSHI_SET_SPAWN_EVERY = 9
+    SUSHI_SET_MIN_SCORE = 180
+    SUSHI_SET_RECOVERY_FRAMES = 26
+    SUSHI_SET_NAMES = {"salmon": "SALMON", "tuna": "TUNA", "adult": "WASABI MIX"}
     HEAL_DROP_CANCEL_CHANCE = 0.0025
     HEAL_SPRITE_BANK = 1
     HEAL_SPRITE_U = 80
@@ -532,6 +540,9 @@ class ShootGame:
     SETTLE_BOUNCE_FRAMES = 22
     SETTLE_SHAKE_FRAMES = 12
     SETTLE_EXPLODE_FRAMES = 24
+    SETTLE_RECOVERY_FLIGHT_FRAMES = 14
+    SETTLE_PLATE_X = 270
+    SETTLE_PLATE_Y = 24
     SUSHI_COMBO_DEFINITIONS = (
         ("three_piece_set", "THREE PIECE SET"),
         ("red_meat_festival", "RED MEAT FESTIVAL"),
@@ -656,6 +667,7 @@ class ShootGame:
         )
         pyxel.mouse(True)
         pyxel.load("shootpx.pyxres")
+        clear_text_cache()
 
         self.frame_count = 0
         self.phase = GamePhase.START
@@ -732,6 +744,12 @@ class ShootGame:
         self.homing_lasers: list[HomingLaser] = []
         self.echo_shots: list[EchoShot] = []
         self.weapon_items: list[WeaponItem] = []
+        self.weapon_icon_images: dict[str, pyxel.Image] = {}
+        self.sushi_sets: dict[int, SushiEnemySet] = {}
+        self.next_sushi_set_id = 0
+        self.regular_spawn_count = 0
+        self.sushi_set_theme_cursor = 0
+        self.settle_plate_set_count = 0
         self.heal_items: list[HealItem] = []
         self.bit_items: list[BitItem] = []
         self.wasabi_items: list[WasabiItem] = []
@@ -815,6 +833,11 @@ class ShootGame:
         self.current_orbit_capacity = self.ORBIT_BASE_CAPACITY
         self.sushi_settle_threshold = self.current_orbit_capacity
         self.sushi_settle_effect = SushiSettleEffect(active=False, sushis=[])
+        self.settle_plate_count = 0
+        self.settle_plate_score = 0
+        self.settle_plate_last_total = 0
+        self.settle_plate_bounce_timer = 0
+        self.settle_plate_total_timer = 0
         self.combo_counts: dict[str, int] = {}
         self.wasabi_pickup_count = 0
         self.barrier_stock = 0
@@ -1372,6 +1395,8 @@ class ShootGame:
         self.bomb_restock_flash_timer = self.BOMB_RESTOCK_FLASH_FRAMES
 
     def _update_ui_timers(self) -> None:
+        self.settle_plate_bounce_timer = max(0, self.settle_plate_bounce_timer - 1)
+        self.settle_plate_total_timer = max(0, self.settle_plate_total_timer - 1)
         if self.bomb_restock_flash_timer > 0:
             self.bomb_restock_flash_timer -= 1
         if self.shot_pick_flash_timer > 0:
@@ -1508,7 +1533,7 @@ class ShootGame:
                 anim_offset=enemy.anim_offset,
                 anim_dir=enemy.anim_dir,
                 display_scale=enemy.display_scale,
-                has_wasabi=False,
+                has_wasabi=enemy.set_has_wasabi,
             )
         )
         self.orbit_acquire_counter += 1
@@ -1711,7 +1736,7 @@ class ShootGame:
         consumed: list[OrbitSushiEntry],
         start_states: list[tuple[OrbitSushiEntry, OrbitSample, float, float, str]],
     ) -> None:
-        if not consumed:
+        if not consumed or self.sushi_settle_effect.active:
             return
 
         n = len(consumed)
@@ -1755,7 +1780,7 @@ class ShootGame:
                     display_scale=entry.display_scale,
                     source_ring=source_ring,
                     radius_group="outer" if is_outer else "inner",
-                    jump_delay=idx * 2,
+                    jump_delay=round(idx * 8 / max(1, n - 1)),
                     explode_vx=math.cos(theta) * speed,
                     explode_vy=math.sin(theta) * speed,
                 )
@@ -1774,6 +1799,23 @@ class ShootGame:
             combo_ids=combo_ids,
             expanded_settlement=expanded_settlement,
         )
+        self._confirm_sushi_settlement_reward(self.sushi_settle_effect)
+
+    def _confirm_sushi_settlement_reward(self, effect: SushiSettleEffect) -> None:
+        if effect.reward_applied:
+            return
+        effect.reward_applied = True
+        effect.score_applied = True
+        effect.reward_is_bonus = self.barrier_stock >= self.BARRIER_STOCK_CAP
+        effect.reward_score = effect.gained_score * (2 if effect.reward_is_bonus else 1)
+        self.score += effect.reward_score
+        self._record_settlement_combos(effect.combo_ids)
+        if not effect.reward_is_bonus:
+            self.add_barrier_stock(effect.gained_barrier)
+            self.audio.play_se("weapon_level_up")
+        else:
+            self.audio.play_se("item_tea_get")
+        self._apply_post_settlement_capacity_rules(effect.consumed_has_wasabi)
 
     def calc_sushi_settle_score(self, consumed_types: list[str]) -> int:
         return sum(self.SUSHI_SCORE.get(sushi_type, 100) for sushi_type in consumed_types)
@@ -1858,23 +1900,29 @@ class ShootGame:
             return
 
         if effect.phase == self.SETTLE_PHASE_EXPLODE:
-            for sushi in effect.sushis:
-                sushi.current_x += sushi.explode_vx
-                sushi.current_y += sushi.explode_vy
+            launch_window = self.SETTLE_EXPLODE_FRAMES - self.SETTLE_RECOVERY_FLIGHT_FRAMES
+            for idx, sushi in enumerate(effect.sushis):
+                delay = round(idx * launch_window / max(1, len(effect.sushis) - 1))
+                t = min(1.0, max(0.0, (effect.timer - delay) / self.SETTLE_RECOVERY_FLIGHT_FRAMES))
+                control_x = (sushi.target_x + self.SETTLE_PLATE_X) * 0.5 + 36
+                control_y = (sushi.target_y + self.SETTLE_PLATE_Y) * 0.5 - 70
+                sushi.current_x = (1-t)**2 * sushi.target_x + 2*(1-t)*t*control_x + t*t*self.SETTLE_PLATE_X
+                sushi.current_y = (1-t)**2 * sushi.target_y + 2*(1-t)*t*control_y + t*t*self.SETTLE_PLATE_Y
+                if t >= 1 and not sushi.done:
+                    sushi.done = True
+                    effect.arrived_count += 1
+                    self.settle_plate_count += 1
+                    self.settle_plate_score += self.SUSHI_SCORE.get(sushi.sushi_type, 100) * (2 if effect.reward_is_bonus else 1)
+                    self.settle_plate_bounce_timer = 6
             if effect.timer >= self.SETTLE_EXPLODE_FRAMES:
                 effect.phase = self.SETTLE_PHASE_FINISH
                 effect.timer = 0
+                self.settle_plate_last_total = effect.reward_score
+                self.settle_plate_total_timer = 45
             return
 
         if effect.phase == self.SETTLE_PHASE_FINISH:
-            self._record_settlement_combos(effect.combo_ids)
-            if self.barrier_stock < self.BARRIER_STOCK_CAP:
-                self.add_barrier_stock(effect.gained_barrier)
-                self.audio.play_se("weapon_level_up")
-            else:
-                self.score += effect.gained_score
-                self.audio.play_se("item_tea_get")
-            self._apply_post_settlement_capacity_rules(effect.consumed_has_wasabi)
+            self._confirm_sushi_settlement_reward(effect)
             self.sushi_settle_effect = SushiSettleEffect(active=False, sushis=[])
 
     def add_barrier_stock(self, amount: int) -> None:
@@ -3188,7 +3236,6 @@ class ShootGame:
         self._sync_active_weapon_slots()
 
     def _active_fire_families(self) -> list[str]:
-        self._sync_active_weapon_slots()
         return self.active_weapon_slots[:2] if self._dual_shot_ready() else [self.current_weapon_family]
 
     def _has_power_weapon_active(self) -> bool:
@@ -4306,6 +4353,8 @@ class ShootGame:
             if not item.active:
                 continue
 
+            if item.reaction_timer > 0:
+                item.reaction_timer -= 1
             if item.switch_lock_timer > 0:
                 item.switch_lock_timer -= 1
             item.bob_phase += self.TEA_BOB_SPEED
@@ -5157,6 +5206,16 @@ class ShootGame:
         return False
 
     def update(self) -> None:
+        self._update_frame()
+        self._update_sushi_sets()
+        # All early-return phases and reward transitions are synchronized before
+        # the same frame is drawn. Drawing only reads the resulting weapon state.
+        if self.phase == GamePhase.START:
+            self._sync_start_preview_weapon_state()
+        else:
+            self._sync_active_weapon_slots()
+
+    def _update_frame(self) -> None:
         self.frame_count += 1
         self.audio.update(self.frame_count)
 
@@ -5165,6 +5224,7 @@ class ShootGame:
         self.effects.update()
         self._update_boss_hp_bar_fx()
         self._update_ui_timers()
+        self.update_sushi_settle_effect()
         self.update_overload()
         self._update_drift_shift()
         self._update_retreat_shadows()
@@ -5201,7 +5261,6 @@ class ShootGame:
         self._update_shooting()
         self._update_special_input()
         self.update_orbit_sushi()
-        self.update_sushi_settle_effect()
 
         if self.boss_intro_timer > 0:
             self._update_boss_intro()
@@ -5731,15 +5790,91 @@ class ShootGame:
             loop_depth=self.boss_spawn_count,
         )
 
+    def _spawn_sushi_set(self, spawn_x: float) -> bool:
+        if len(self.sushi_sets) >= self.SUSHI_SET_MAX_ACTIVE or len(self.enemies) > 17:
+            return False
+        theme = ("salmon", "tuna", "adult")[self.sushi_set_theme_cursor % 3]
+        self.sushi_set_theme_cursor += 1
+        types = {"salmon": ("zigzag",) * 3, "tuna": ("basic",) * 3,
+                 "adult": ("zigzag", "basic", "aimer")}[theme]
+        center = min(self.WIDTH - 85, max(85, spawn_x))
+        group_id = self.next_sushi_set_id
+        self.next_sushi_set_id += 1
+        group = SushiEnemySet(group_id, theme, x=center, y=-40)
+        self.sushi_sets[group_id] = group
+        members = []
+        for index, enemy_type in enumerate(types):
+            enemy = self._create_enemy(center + (index - 1) * 34, enemy_type)
+            enemy.y -= index * 14
+            enemy.set_group_id = group_id
+            enemy.set_member_index = index
+            enemy.set_has_wasabi = theme == "adult" and index == 2
+            enemy.vx = 0.0
+            enemy.move_phase = 0.0
+            members.append(enemy)
+        # A compact diagonal entry; native enemy HP, scale, hitboxes and shots stay intact.
+        common_speed = min(enemy.vy for enemy in members)
+        for enemy in members:
+            enemy.vy = common_speed
+        self.enemies.extend(members)
+        return True
+
+    def _record_sushi_set_defeat(self, enemy: Enemy) -> None:
+        group = getattr(self, "sushi_sets", {}).get(enemy.set_group_id)
+        if group is None or group.state != "active":
+            return
+        group.defeated_mask |= 1 << enemy.set_member_index
+
+    def _update_sushi_sets(self) -> None:
+        for group_id, group in list(self.sushi_sets.items()):
+            if group.state == "active":
+                members = [e for e in self.enemies if e.set_group_id == group_id]
+                present_mask = sum(1 << e.set_member_index for e in members)
+                expected_mask = (1 << group.total) - 1
+                if any(e.state == "retreating" or not e.active for e in members):
+                    group.escaped = True
+                if present_mask | group.defeated_mask != expected_mask:
+                    group.escaped = True
+                if group.escaped:
+                    del self.sushi_sets[group_id]
+                    continue
+                if group.remaining == 0:
+                    group.state = "recovering"
+                    group.start_x, group.start_y = group.x, group.y
+                    group.age = 0
+                elif members:
+                    group.x = sum(e.x for e in members) / len(members)
+                    group.y = sum(e.y for e in members) / len(members)
+                    group.radius = min(90.0, max(28.0, max(math.hypot(e.x-group.x, e.y-group.y) + max(e.hit_half_w,e.hit_half_h) + 8 for e in members)))
+            else:
+                group.age += 1
+                if group.age > 8:
+                    t = min(1.0, (group.age - 8) / (self.SUSHI_SET_RECOVERY_FRAMES - 8))
+                    cx = (group.start_x + self.SETTLE_PLATE_X) / 2 + 25
+                    cy = (group.start_y + self.SETTLE_PLATE_Y) / 2 - 60
+                    group.x = (1-t)**2*group.start_x + 2*(1-t)*t*cx + t*t*self.SETTLE_PLATE_X
+                    group.y = (1-t)**2*group.start_y + 2*(1-t)*t*cy + t*t*self.SETTLE_PLATE_Y
+                if group.age >= self.SUSHI_SET_RECOVERY_FRAMES:
+                    self.settle_plate_set_count += 1
+                    self.settle_plate_bounce_timer = 6
+                    del self.sushi_sets[group_id]
+
     def _update_spawning(self) -> None:
         self.spawn_timer -= 1
         if self.spawn_timer <= 0:
             drift_spawn = self._drift_x_bias(self.DRIFT_SPAWN_X_SHIFT)
             spawn_x = float(pyxel.rndi(self.SIDE_MARGIN, self.WIDTH - self.SIDE_MARGIN)) - drift_spawn
             spawn_x = min(max(spawn_x, self.SIDE_MARGIN), self.WIDTH - self.SIDE_MARGIN)
-            enemy_type = pick_enemy_type(self.score, self.boss_spawn_count)
-            self.enemies.append(self._create_enemy(spawn_x, enemy_type))
-            self.spawn_timer = int(60 * self._current_spawn_interval_sec())
+            self.regular_spawn_count += 1
+            spawn_budget = 1
+            if (self.score >= self.SUSHI_SET_MIN_SCORE
+                    and self.regular_spawn_count % self.SUSHI_SET_SPAWN_EVERY == 0
+                    and self._spawn_sushi_set(spawn_x)):
+                spawn_budget = 3
+            else:
+                enemy_type = pick_enemy_type(self.score, self.boss_spawn_count)
+                self.enemies.append(self._create_enemy(spawn_x, enemy_type))
+            self.spawn_timer = int(60 * self._current_spawn_interval_sec()) * spawn_budget
 
     def _update_enemies(self) -> None:
         update_enemies(
@@ -6106,16 +6241,18 @@ class ShootGame:
         self._trim_enemy_bullets_to_cap()
 
     def _remove_offscreen_enemies(self) -> None:
-        self.enemies = [
-            e for e in self.enemies
-            if (
-                e.y <= self.HEIGHT + (self.ENEMY_HALF_H * e.display_scale)
-                and (e.state != "retreating" or e.y >= self.PLAY_TOP - 40)
-                and e.x >= -40
-                and e.x <= self.WIDTH + 40
-                and e.active
+        survivors = []
+        for enemy in self.enemies:
+            keep = (
+                enemy.y <= self.HEIGHT + self.ENEMY_HALF_H * enemy.display_scale
+                and (enemy.state != "retreating" or enemy.y >= self.PLAY_TOP - 40)
+                and -40 <= enemy.x <= self.WIDTH + 40 and enemy.active
             )
-        ]
+            if keep:
+                survivors.append(enemy)
+            elif enemy.set_group_id in self.sushi_sets:
+                self.sushi_sets[enemy.set_group_id].escaped = True
+        self.enemies = survivors
 
     def _echo_segment(self, shot: EchoShot) -> tuple[float, float, float, float]:
         length = math.hypot(shot.dx, shot.dy)
@@ -6292,6 +6429,7 @@ class ShootGame:
                 item.vx += bullet.vx * 0.55
                 item.vy = max(-1.2, item.vy - 0.28)
                 item.switch_lock_timer = self.WEAPON_ITEM_SWITCH_LOCK_FRAMES
+                item.reaction_timer = self.WEAPON_ITEM_REACTION_FRAMES
                 if bullet.piercing:
                     bullet.hit_cooldowns[id(item)] = 8
                     break
@@ -6449,6 +6587,7 @@ class ShootGame:
         return "enemy_destroy"
 
     def _record_enemy_defeat(self, enemy: Enemy) -> None:
+        self._record_sushi_set_defeat(enemy)
         self.enemy_kill_count += 1
         self.kill_counts_by_type[enemy.enemy_type] = self.kill_counts_by_type.get(enemy.enemy_type, 0) + 1
 
@@ -6809,6 +6948,7 @@ class ShootGame:
         self._draw_boss_special_beam()
         self._draw_bombs()
         self._draw_bomb_visuals()
+        self._draw_sushi_sets(recovering=False)
         self._draw_enemies()
         self._draw_boss()
         self._draw_boss_defeat_sequence()
@@ -6828,6 +6968,8 @@ class ShootGame:
         self._draw_fever_arrival_effect()
         self._draw_boss_pattern_label()
         self._draw_hud()
+        self._draw_settlement_recovery()
+        self._draw_sushi_sets(recovering=True)
         self._draw_reward_notice()
         self._draw_mobile_controls()
 
@@ -7491,7 +7633,7 @@ class ShootGame:
         effect = self.sushi_settle_effect
         if not effect.active or not effect.sushis:
             return
-        if effect.phase >= self.SETTLE_PHASE_FINISH:
+        if effect.phase >= self.SETTLE_PHASE_EXPLODE:
             return
         sheet = self.settle_sparkle_front_sheet_image if front else self.settle_sparkle_back_sheet_image
         if sheet is None:
@@ -7583,7 +7725,7 @@ class ShootGame:
             )
 
         effect = self.sushi_settle_effect
-        if effect.active and effect.sushis:
+        if effect.active and effect.sushis and effect.phase < self.SETTLE_PHASE_EXPLODE:
             glow = effect.phase == self.SETTLE_PHASE_GLOW
             for sushi in effect.sushis:
                 items.append(
@@ -7695,7 +7837,7 @@ class ShootGame:
         cx = int(round(effect.center_x)) + 3
         cy = int(round(effect.center_y))
         main_text = "ARIGATO!!"
-        sub_text = "BONUS SCORE" if self.barrier_stock >= self.BARRIER_STOCK_CAP else "BARRIER+1"
+        sub_text = "BONUS SCORE" if effect.reward_is_bonus else "BARRIER+1"
 
         main_scale = 1
         sub_scale = 1
@@ -7909,6 +8051,47 @@ class ShootGame:
             if bullet.radius >= 5:
                 pyxel.circb(bx, by, bullet.radius, 7)
 
+    def _weapon_item_visual_state(self, item: WeaponItem) -> tuple[float, float, float]:
+        if item.reaction_timer <= 0:
+            return 1.0, 0.0, 0.0
+        index = min(7, max(0, self.WEAPON_ITEM_REACTION_FRAMES - item.reaction_timer))
+        scales = (0.72, 0.78, 0.90, 1.10, 1.16, 1.08, 1.02, 1.0)
+        offsets = (0.0, -1.0, -2.0, -3.0, -2.0, -1.0, 0.0, 0.0)
+        return scales[index], offsets[index], (7 - index) * (360.0 / 7)
+
+    def _weapon_icon_image(self, family: str) -> pyxel.Image:
+        if family in self.weapon_icon_images:
+            return self.weapon_icon_images[family]
+        image = pyxel.Image(32, 32)
+        ix = iy = 16
+        if family == self.WEAPON_FAMILY_FAN:
+            image.rect(ix - 3, iy - 2, 6, 5, 3)
+            image.line(ix + 6, iy - 1, ix + 9, iy + 1, 7)
+            image.line(ix + 9, iy + 1, ix + 8, iy + 4, 7)
+            image.pset(ix - 1, iy - 1, 11)
+            image.pset(ix, iy - 2, 11)
+            image.pset(ix + 1, iy - 1, 11)
+        elif family == self.WEAPON_FAMILY_LANCE:
+            image.line(ix, iy + 5, ix, iy - 5, 7)
+            image.line(ix - 1, iy + 3, ix - 1, iy - 2, 8)
+            image.line(ix + 1, iy + 3, ix + 1, iy - 2, 8)
+            image.tri(ix, iy - 7, ix - 3, iy - 1, ix + 3, iy - 1, 15)
+        elif family == self.WEAPON_FAMILY_RAIN:
+            image.line(ix, iy + 4, ix, iy - 3, 7)
+            image.pset(ix, iy - 5, 12)
+            image.pset(ix - 2, iy - 1, 15)
+            image.pset(ix + 2, iy + 1, 15)
+        elif family == self.WEAPON_FAMILY_BEAM:
+            image.rect(ix - 2, iy - 5, 5, 10, 14)
+            image.rect(ix - 1, iy - 4, 3, 8, 7)
+            image.pset(ix, iy - 6, 15)
+        elif family == self.WEAPON_FAMILY_ECHO:
+            image.line(ix - 4, iy + 4, ix + 4, iy - 4, 12)
+            image.line(ix - 3, iy + 5, ix + 5, iy - 3, 7)
+            image.pset(ix + 5, iy - 5, 15)
+        self.weapon_icon_images[family] = image
+        return image
+
     def _draw_weapon_items(self) -> None:
         for item in self.weapon_items:
             ix = int(item.x)
@@ -7918,6 +8101,12 @@ class ShootGame:
 
             pyxel.circ(ix, iy, 7, accent)
             pyxel.circb(ix, iy, 7, ring_color)
+
+            if item.reaction_timer > 0:
+                scale, offset_y, rotate = self._weapon_item_visual_state(item)
+                pyxel.blt(ix - 16, iy - 16 + offset_y, self._weapon_icon_image(item.family),
+                          0, 0, 32, 32, 0, rotate=rotate, scale=scale)
+                continue
 
             if item.family == self.WEAPON_FAMILY_FAN:
                 pyxel.rect(ix - 3, iy - 2, 6, 5, 3)
@@ -8364,10 +8553,35 @@ class ShootGame:
             cy = int(round(shadow.y))
             pyxel.circb(cx, cy, max(8, int(10 * shadow.display_scale)), 5)
 
+    def _draw_sushi_sets(self, *, recovering: bool) -> None:
+        for group in self.sushi_sets.values():
+            if (group.state == "recovering") != recovering:
+                continue
+            if not recovering and not self.PLAY_TOP - 20 <= group.y <= self.HEIGHT + 20:
+                continue
+            radius = group.radius
+            color = 5 if self.play_bg_color == 13 else 13
+            if recovering:
+                radius = max(3.0, group.radius * (1 - min(1.0, group.age / 8)) + 3)
+                color = 7 if group.age <= 8 and group.age % 2 == 0 else color
+            # Dashed single-pixel arcs are decoration, never collision geometry.
+            for segment in range(12):
+                a = segment * math.tau / 12
+                b = a + math.tau / 24
+                pyxel.line(group.x + math.cos(a)*radius, group.y + math.sin(a)*radius,
+                           group.x + math.cos(b)*radius, group.y + math.sin(b)*radius, color)
+            if not recovering:
+                label = f"{self.SUSHI_SET_NAMES[group.theme]} {group.remaining}"
+                x = max(4, min(self.WIDTH-big_text_width(label, 1)-4, int(group.x)-big_text_width(label,1)//2))
+                y = max(self.PLAY_TOP + 2, int(group.y-radius)-12)
+                draw_big_text(x, y, label, 1, 6 if self.play_bg_color == 13 else 13, shadow_color=1)
+
     def _draw_enemies(self) -> None:
         self._draw_retreat_shadows()
         for enemy in self.enemies:
             self._draw_enemy_sprite(enemy)
+            if enemy.set_has_wasabi:
+                self._draw_wasabi_sprite(enemy.x, enemy.y - 4, scale=0.65)
             self._draw_enemy_hp_bar(enemy)
 
     def _draw_boss(self) -> None:
@@ -8750,9 +8964,6 @@ class ShootGame:
         draw_big_text(sub_x, center_y + 42, sub, sub_scale, 0, shadow_color=9)
 
     def _draw_hud(self) -> None:
-        if self.phase == GamePhase.START:
-            self._sync_start_preview_weapon_state()
-
         pyxel.rect(0, 0, self.WIDTH, self.HUD_H, self.hud_bg_color)
 
         left_x = 8
@@ -8767,7 +8978,7 @@ class ShootGame:
         right_value_x = 240
 
         draw_big_text(left_x, top_label_y, "SCORE", 1, 15, shadow_color=1)
-        draw_big_text(left_x, top_value_y, f"{self.score:07d}", 2, 7, shadow_color=1)
+        draw_big_text(left_x, top_value_y, f"{self.score:07d}", 2, 7, shadow_color=1, cache_slot="score")
 
         draw_big_text(146, top_label_y, "HP", 1, 15, shadow_color=1)
         self._draw_player_hp_meter(146, top_value_y + 4)
@@ -8776,7 +8987,7 @@ class ShootGame:
         kill_label_x = self.WIDTH - 8 - big_text_width("FREED", 1)
         kill_value_x = self.WIDTH - 8 - big_text_width(kill_text, 2)
         draw_big_text(kill_label_x, top_label_y, "FREED", 1, 15, shadow_color=1)
-        draw_big_text(kill_value_x, top_value_y, kill_text, 2, 12, shadow_color=1)
+        draw_big_text(kill_value_x, top_value_y, kill_text, 2, 12, shadow_color=1, cache_slot="freed")
 
         draw_big_text(left_x, info_row1_y + 3, "MOVE", 1, 15, shadow_color=1)
         draw_hud_value_text(left_value_x, info_row1_y + 4, "ARROWS/DRAG", 7, shadow_color=1)
@@ -8795,6 +9006,7 @@ class ShootGame:
             f"X {self.laser_shot_count}",
             laser_text_color,
             shadow_color=1,
+            cache_slot="laser_count",
         )
         draw_big_text(right_x, info_row2_y + 3, "BOMB", 1, bomb_label_color, shadow_color=1)
         draw_hud_value_text(
@@ -8803,6 +9015,7 @@ class ShootGame:
             f"C {self.bomb_stock}/{self._bomb_capacity()}",
             bomb_value_color,
             shadow_color=1,
+            cache_slot="bomb_stock",
         )
 
         if self.phase == GamePhase.START:
@@ -8810,7 +9023,6 @@ class ShootGame:
             preview_slots = list(self.active_weapon_slots[:2])
             sub_family = preview_slots[1] if len(preview_slots) >= 2 else None
         else:
-            self._sync_active_weapon_slots()
             main_family = self.current_weapon_family
             sub_family = next((slot for slot in self.active_weapon_slots if slot != main_family), None)
 
@@ -8819,6 +9031,34 @@ class ShootGame:
 
         self._draw_overload_ui(left_x, bottom_row_y)
         self._draw_boss_buff_ui(134, bottom_row_y)
+        self._draw_settlement_plate()
+
+    def _draw_settlement_plate(self) -> None:
+        if self.settle_plate_count == 0 and self.settle_plate_set_count == 0 and not self.sushi_settle_effect.active:
+            return
+        x, y = self.SETTLE_PLATE_X, self.SETTLE_PLATE_Y
+        bounce = -math.sin(self.settle_plate_bounce_timer / 6 * math.pi) * 2
+        pyxel.elli(x - 21, y - 4 + bounce, 42, 10, 13)
+        pyxel.ellib(x - 21, y - 4 + bounce, 42, 10, 7)
+        for i in range(min(6, self.settle_plate_count)):
+            pyxel.rect(x - 16 + i * 6, y - 2 + bounce, 4, 3, 10 if i % 2 else 8)
+        draw_big_text(234, 6, f"P {self.settle_plate_count} S {self.settle_plate_set_count}", 1, 7, shadow_color=1, cache_slot="plate_count")
+        value = f"+{self.settle_plate_last_total}" if self.settle_plate_total_timer else str(self.settle_plate_score)
+        draw_big_text(242, 32, value, 1, 10, shadow_color=1, cache_slot="plate_score")
+
+    def _draw_settlement_recovery(self) -> None:
+        effect = self.sushi_settle_effect
+        if not effect.active or effect.phase != self.SETTLE_PHASE_EXPLODE:
+            return
+        for sushi in effect.sushis or []:
+            if sushi.done:
+                continue
+            self._draw_orbit_sushi(
+                sushi.current_x, sushi.current_y, enemy_type=sushi.enemy_type,
+                has_wasabi=sushi.has_wasabi, anim_offset=sushi.anim_offset,
+                anim_dir=sushi.anim_dir, display_scale=sushi.display_scale,
+                sample_scale=1.0, brightness_rank=2, render_scale=1.125,
+            )
 
     def _draw_player_hp_meter(self, x: int, y: int) -> None:
         block_w = 13

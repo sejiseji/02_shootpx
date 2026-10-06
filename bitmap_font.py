@@ -1,6 +1,99 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+
 import pyxel
+
+
+# Software text images contain palette indices, not RGB values. Blitting applies
+# the screen palette/clip/camera exactly as the original rectangle drawing does.
+TEXT_CACHE_MAX_ENTRIES = 128
+TEXT_CACHE_MAX_PIXELS = 262144
+HUD_CACHE_MAX_SLOTS = 32
+HUD_CACHE_MAX_PIXELS = 65536
+
+
+class _TextCache:
+    def __init__(self, max_entries: int, max_pixels: int):
+        self.max_entries = max_entries
+        self.max_pixels = max_pixels
+        self.entries = OrderedDict()
+        self.pixels = 0
+
+    def clear(self) -> None:
+        self.entries.clear()
+        self.pixels = 0
+
+    def get(self, slot, signature):
+        entry = self.entries.get(slot)
+        if entry is None:
+            return None
+        if entry[0] != signature:
+            self.pixels -= entry[2]
+            del self.entries[slot]
+            return None
+        self.entries.move_to_end(slot)
+        return entry[1]
+
+    def put(self, slot, signature, value, pixels: int) -> None:
+        if pixels > self.max_pixels:
+            return
+        while self.entries and (
+            len(self.entries) >= self.max_entries or self.pixels + pixels > self.max_pixels
+        ):
+            _, entry = self.entries.popitem(last=False)
+            self.pixels -= entry[2]
+        self.entries[slot] = (signature, value, pixels)
+        self.pixels += pixels
+
+
+_text_cache = _TextCache(TEXT_CACHE_MAX_ENTRIES, TEXT_CACHE_MAX_PIXELS)
+_hud_cache = _TextCache(HUD_CACHE_MAX_SLOTS, HUD_CACHE_MAX_PIXELS)
+
+
+def clear_text_cache() -> None:
+    """Invalidate after changing glyph definitions or restarting the renderer."""
+    _text_cache.clear()
+    _hud_cache.clear()
+
+
+def _draw_cached_text(x, y, text, sx, sy, color, shadow, advance, mode, slot):
+    # Keep legacy rasterization for fractional positions or unusual dimensions.
+    if x != int(x) or y != int(y) or sx < 1 or sy < 1 or advance < 1:
+        return False
+    text = text.upper()
+    if not text:
+        return True
+    ox = (sx if mode == "big" else max(1, sx // 2)) if shadow is not None else 0
+    oy = sy if shadow is not None else 0
+    if mode == "hud":
+        ox = oy = 1 if shadow is not None else 0
+    width = (len(text) - 1) * advance + (9 if mode == "hud" else 5 * sx) + ox
+    height = 7 * sy + oy
+    cache = _text_cache if slot is None else _hud_cache
+    signature = (text, sx, sy, color, shadow, advance, mode)
+    key = signature if slot is None else (mode, slot)
+    value = cache.get(key, signature)
+    if value is None:
+        if width * height > cache.max_pixels:
+            return False
+        transparent = next(c for c in range(16) if c != color and c != shadow)
+        image = pyxel.Image(width, height)
+        image.cls(transparent)
+        layers = [(ox, oy, shadow), (0, 0, color)] if shadow is not None else [(0, 0, color)]
+        for dx, dy, ink in layers:
+            for i, ch in enumerate(text):
+                for row, bits in enumerate(BIG_FONT.get(ch, BIG_FONT[" "])):
+                    for col, bit in enumerate(bits):
+                        if bit == "1":
+                            gx = HUD_VALUE_COL_X[col] if mode == "hud" else col * sx
+                            gw = HUD_VALUE_COL_W[col] if mode == "hud" else sx
+                            image.rect(i * advance + dx + gx, dy + row * sy, gw, sy, ink)
+        value = (image, width, height, transparent)
+        cache.put(key, signature, value, width * height)
+    image, width, height, transparent = value
+    pyxel.blt(x, y, image, 0, 0, width, height, transparent)
+    return True
 
 
 BIG_FONT = {
@@ -55,7 +148,11 @@ def draw_big_text(
     scale: int,
     color: int,
     shadow_color: int | None = None,
+    *,
+    cache_slot: str | None = None,
 ) -> None:
+    if _draw_cached_text(x, y, text, scale, scale, color, shadow_color, 6 * scale, "big", cache_slot):
+        return
     if shadow_color is not None:
         _draw_big_text_core(x + scale, y + scale, text, scale, shadow_color)
     _draw_big_text_core(x, y, text, scale, color)
@@ -71,6 +168,9 @@ def draw_scaled_text(
     shadow_color: int | None = None,
     advance_x: int | None = None,
 ) -> None:
+    advance = 6 * scale_x if advance_x is None else advance_x
+    if _draw_cached_text(x, y, text, scale_x, scale_y, color, shadow_color, advance, "scaled", None):
+        return
     if shadow_color is not None:
         _draw_scaled_text_core(
             x + max(1, scale_x // 2),
@@ -147,7 +247,11 @@ def draw_hud_value_text(
     text: str,
     color: int,
     shadow_color: int | None = None,
+    *,
+    cache_slot: str | None = None,
 ) -> None:
+    if _draw_cached_text(x, y, text, 1, 1, color, shadow_color, 10, "hud", cache_slot):
+        return
     if shadow_color is not None:
         _draw_hud_value_text_core(x + 1, y + 1, text, shadow_color)
     _draw_hud_value_text_core(x, y, text, color)

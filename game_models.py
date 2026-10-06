@@ -87,6 +87,10 @@ class Enemy:
     retreat_vy: float = 0.0
     active: bool = True
 
+    set_group_id: int | None = None
+    set_member_index: int = 0
+    set_has_wasabi: bool = False
+
 
 @dataclass
 class Boss:
@@ -179,6 +183,8 @@ class WeaponItem:
     bob_phase: float = 0.0
     switch_lock_timer: int = 0
     active: bool = True
+
+    reaction_timer: int = 0
 
 
 @dataclass
@@ -449,6 +455,10 @@ class SushiSettleEffect:
     consumed_has_wasabi: bool = False
     combo_ids: list[str] = field(default_factory=list)
     expanded_settlement: bool = False
+    reward_applied: bool = False
+    reward_score: int = 0
+    reward_is_bonus: bool = False
+    arrived_count: int = 0
 
 
 @dataclass
@@ -459,3 +469,23 @@ class DrawItem:
     x: float
     y: float
     payload: Any = None
+
+
+@dataclass
+class SushiEnemySet:
+    group_id: int
+    theme: str
+    total: int = 3
+    defeated_mask: int = 0
+    escaped: bool = False
+    state: str = "active"
+    age: int = 0
+    x: float = 0.0
+    y: float = 0.0
+    radius: float = 50.0
+    start_x: float = 0.0
+    start_y: float = 0.0
+
+    @property
+    def remaining(self) -> int:
+        return self.total - self.defeated_mask.bit_count()
