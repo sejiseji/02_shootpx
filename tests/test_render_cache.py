@@ -143,7 +143,15 @@ class RenderCacheTests(unittest.TestCase):
             for target in targets:
                 if target is not None and id(target) not in identities:
                     identities[id(target)] = ("object", len(identities))
-            results.append((pixels(support.screen), freeze(vars(game), identities), random.getstate()))
+            image = pixels(support.screen)
+            if game.reward_notice_kind.startswith("weapon_") and game.reward_notice_timer > 0:
+                # Weapon cards intentionally replace the old notice. Preserve
+                # the full underlying game/HUD oracle; test_weapon_cutin checks
+                # the new pixels, timing, footprint, and draw-state isolation.
+                with patch.object(game, "_draw_reward_notice"):
+                    game.draw()
+                image = pixels(support.screen)
+            results.append((image, freeze(vars(game), identities), random.getstate()))
         self.assertEqual(results[0][0], results[1][0], f"pixels at frame {frame}")
         for name in results[0][1]:
             self.assertEqual(results[0][1][name], results[1][1][name], f"{name} at frame {frame}")

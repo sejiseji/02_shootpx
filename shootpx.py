@@ -8,6 +8,7 @@ import pyxel
 
 from audio_system import AudioSystem
 from bitmap_font import (
+    BIG_FONT,
     big_text_width,
     clear_text_cache,
     draw_big_text,
@@ -295,6 +296,7 @@ class ShootGame:
     REWARD_CUTIN_SLANT = 28
     REWARD_CUTIN_IN_FRAMES = 10
     REWARD_CUTIN_OUT_FRAMES = 12
+    WEAPON_CUTIN_TRANSPARENT = 16
     REWARD_DISSOLVE_FRAMES = 18
 
     PLAYER_SPEED_CAP = 8
@@ -900,6 +902,7 @@ class ShootGame:
         self.reward_notice_accent = 10
         self.reward_notice_kind = "reward"
         self.reward_notice_timer = 0
+        self.weapon_cutin_frames = ()
         self.reward_intro_timer = 0
         self.reward_pair_preview_index = 0
         self.bomb_pattern_seed_cursor = 0
@@ -3379,6 +3382,7 @@ class ShootGame:
         self.reward_notice_accent = accent
         self.reward_notice_kind = kind
         self.reward_notice_timer = self.REWARD_NOTICE_FRAMES
+        self._prepare_weapon_cutin()
 
     def _play_weapon_cutin_se(self) -> None:
         self.audio.play_se("weapon_cutin")
@@ -5208,6 +5212,11 @@ class ShootGame:
     def update(self) -> None:
         self._update_frame()
         self._update_sushi_sets()
+        if self.reward_notice_kind.startswith("weapon_") and (
+            self.phase != GamePhase.PLAYING or self.reward_notice_timer <= 0
+        ):
+            self.reward_notice_timer = 0
+            self.weapon_cutin_frames = ()
         # All early-return phases and reward transitions are synchronized before
         # the same frame is drawn. Drawing only reads the resulting weapon state.
         if self.phase == GamePhase.START:
@@ -9146,11 +9155,139 @@ class ShootGame:
             draw_big_text(x, y + 3, "BARRIER", 1, 11, shadow_color=1)
             draw_big_text(x + 60, y, str(self.barrier_stock), 2, 7, shadow_color=1)
 
+    @staticmethod
+    def _weapon_card_text(image, x, y, text, color, preferred_scale=1):
+        """Use existing glyphs on a bounded card, without the global text cache."""
+        available = 153
+        scale_x = preferred_scale if big_text_width(text, preferred_scale) <= available else 1
+        scale_y = preferred_scale
+        max_chars = (available + scale_x) // (6 * scale_x)
+        lines = [text]
+        if len(text) > max_chars:
+            scale_y = 1
+            lines = []
+            remaining = text
+            while remaining:
+                split = remaining.rfind(" ", 0, max_chars + 1) if len(remaining) > max_chars else len(remaining)
+                if split <= 0:
+                    split = max_chars
+                lines.append(remaining[:split])
+                remaining = remaining[split:].lstrip()
+        for line_index, line in enumerate(lines):
+            for index, char in enumerate(line.upper()):
+                for row, bits in enumerate(BIG_FONT.get(char, BIG_FONT[" "])):
+                    for col, bit in enumerate(bits):
+                        if bit == "1":
+                            image.rect(x + index * 6 * scale_x + col * scale_x,
+                                       y + line_index * 8 + row * scale_y,
+                                       scale_x, scale_y, color)
+        return scale_x, scale_y, tuple(lines)
+
+    def _prepare_weapon_cutin(self) -> None:
+        """One current notice, prebuilt at notification time; drawing only blits.
+
+        At most thirteen images are retained, regardless of pickups, levels,
+        bonuses, or text values. The flip uses horizontal compression, not 3D.
+        """
+        self.weapon_cutin_frames = ()
+        family = self.reward_notice_kind.removeprefix("weapon_")
+        if not self.reward_notice_kind.startswith("weapon_") or family not in self.WEAPON_FAMILY_ORDER:
+            return
+        accent = self._weapon_accent(family)
+        width, height = self.REWARD_CUTIN_W, self.REWARD_CUTIN_H
+        face = pyxel.Image(width, height)
+        face.cls(7)
+        face.rect(1, 1, width - 2, height - 2, 13)
+        face.rect(3, 3, width - 6, height - 6, 7)
+        face.rect(5, 5, 59, 58, 1)
+        face.line(5, 5, 63, 5, accent)
+        face.line(5, 62, 63, 62, accent)
+        face.line(69, 7, 69, 61, 13)
+        face.text(77, 8, self.reward_notice_label, 1)
+        self._weapon_card_text(face, 77, 20, self.reward_notice_text, 1, 2)
+        self._weapon_card_text(face, 77, 49, self.reward_notice_desc, 1)
+        level = self.weapon_levels.get(family, self.SHOT_LEVEL_SINGLE)
+        face.text(78, 40, f"LV {level + 1} / {self._shot_level_name(level)}", 5)
+        face.line(3, 1, width - 4, 1, 7)
+        # Preserve each weapon's existing visual vocabulary inside the icon bay.
+        if family == self.WEAPON_FAMILY_FAN:
+            for dx in (-13, 0, 13):
+                face.line(34, 53, 34 + dx, 23, accent)
+                face.line(35, 53, 35 + dx, 23, 7)
+            face.circ(34, 54, 4, 0)
+        elif family == self.WEAPON_FAMILY_LANCE:
+            for dx in (-10, 0, 10):
+                face.rect(32 + dx, 28, 2, 27, accent if dx == 0 else 7)
+            face.tri(33, 19, 26, 30, 40, 30, accent)
+            face.line(33, 20, 33, 29, 7)
+        elif family == self.WEAPON_FAMILY_RAIN:
+            for x, y, radius in ((20, 25, 3), (34, 35, 4), (47, 24, 3), (50, 47, 4)):
+                face.circb(x, y, radius, 7)
+                face.circ(x, y + 1, max(1, radius - 1), accent)
+        elif family == self.WEAPON_FAMILY_BEAM:
+            for offset in (0, 12, 24):
+                face.line(14 + offset, 53, 27 + offset, 24, accent)
+                face.line(15 + offset, 53, 28 + offset, 24, accent)
+                face.line(13 + offset, 52, 26 + offset, 24, 7)
+            face.pset(40, 21, 7)
+        else:
+            for dx in (0, 2):
+                face.line(19 + dx, 53, 38 + dx, 33, 7 if dx else accent)
+                face.line(38 + dx, 33, 51 + dx, 22, 7 if dx else accent)
+                face.line(38 + dx, 33, 52 + dx, 40, 7 if dx else accent)
+            face.pset(51, 21, 7)
+        # The existing slanted notice footprint is the occlusion limit. Preserve
+        # its transparent right-hand cutout instead of covering more bullets.
+        mask = pyxel.Image(width, height)
+        mask.cls(0)
+        mask.rect(0, 0, width - self.REWARD_CUTIN_SLANT, height, 1)
+        mask.tri(width - self.REWARD_CUTIN_SLANT, 0, width, 0,
+                 width - self.REWARD_CUTIN_SLANT, height, 1)
+        face.line(width - 4, 3, width - self.REWARD_CUTIN_SLANT - 3, height - 4, 13)
+        faces = []
+        for corner_color in (accent, 7, 6):
+            variant = pyxel.Image(width, height)
+            variant.blt(0, 0, face, 0, 0, width, height)
+            for x, y, sx, sy in ((4, 2, 1, 1), (width - 5, 2, -1, 1),
+                                 (4, height - 3, 1, -1), (width - self.REWARD_CUTIN_SLANT - 5, height - 3, -1, -1)):
+                variant.line(x, y, x + sx * 7, y, corner_color)
+                variant.line(x, y, x, y + sy * 5, corner_color)
+            for y in range(height):
+                for x in range(width):
+                    if not mask.pget(x, y):
+                        variant.pset(x, y, self.WEAPON_CUTIN_TRANSPARENT)
+            faces.append(variant)
+        frames = []
+        for elapsed in range(self.REWARD_NOTICE_FRAMES):
+            face = faces[1 if 8 <= elapsed < 16 else 2 if 16 <= elapsed < 20 else 0]
+            if elapsed < self.REWARD_CUTIN_IN_FRAMES:
+                flip_width = max(2, round(width * math.sin(math.pi / 2 * elapsed / self.REWARD_CUTIN_IN_FRAMES)))
+                sprite = pyxel.Image(flip_width, height)
+                for x in range(flip_width):
+                    sprite.blt(x, 0, face, min(width - 1, int(x * width / flip_width)), 0, 1, height)
+                sprite.line(0, 2, 0, height - 3, 13)
+                frames.append((sprite, (width - flip_width) // 2))
+            else:
+                frames.append((face, 0))
+        self.weapon_cutin_frames = tuple(frames)
+
+    def _draw_weapon_cutin(self, elapsed: int) -> None:
+        intro = min(1.0, elapsed / self.REWARD_CUTIN_IN_FRAMES)
+        outro = min(1.0, self.reward_notice_timer / self.REWARD_CUTIN_OUT_FRAMES)
+        eased = 1.0 - (1.0 - min(intro, outro)) ** 3
+        start_x = -self.REWARD_CUTIN_W - self.REWARD_CUTIN_SLANT - 36
+        x = int(start_x + (8 - start_x) * eased)
+        sprite, offset = self.weapon_cutin_frames[min(len(self.weapon_cutin_frames) - 1, max(0, elapsed))]
+        pyxel.blt(x + offset, self.REWARD_CUTIN_Y, sprite, 0, 0, sprite.width, sprite.height, self.WEAPON_CUTIN_TRANSPARENT)
+
     def _draw_reward_notice(self) -> None:
         if self.reward_notice_timer <= 0 or self.phase != GamePhase.PLAYING:
             return
 
         elapsed = self.REWARD_NOTICE_FRAMES - self.reward_notice_timer
+        if self.reward_notice_kind.startswith("weapon_") and self.weapon_cutin_frames:
+            self._draw_weapon_cutin(elapsed)
+            return
         intro = min(1.0, elapsed / self.REWARD_CUTIN_IN_FRAMES)
         outro = min(1.0, self.reward_notice_timer / self.REWARD_CUTIN_OUT_FRAMES)
         visibility = min(intro, outro)
