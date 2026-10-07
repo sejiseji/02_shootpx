@@ -485,6 +485,10 @@ class SushiEnemySet:
     radius: float = 50.0
     start_x: float = 0.0
     start_y: float = 0.0
+    formation: str = "diagonal"
+    motion_age: int = 0
+    motion_offset: float = 0.0
+    motion_amplitude: float = 0.0
 
     @property
     def remaining(self) -> int:

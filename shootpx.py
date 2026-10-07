@@ -249,6 +249,9 @@ class ShootGame:
     SUSHI_SET_SPAWN_EVERY = 9
     SUSHI_SET_MIN_SCORE = 180
     SUSHI_SET_RECOVERY_FRAMES = 26
+    SUSHI_SET_FORMATIONS = ("diagonal", "row", "vee", "sway")
+    SUSHI_SET_SWAY_AMPLITUDE = 18.0
+    SUSHI_SET_SWAY_PERIOD = 180
     SUSHI_SET_NAMES = {"salmon": "SALMON", "tuna": "TUNA", "adult": "WASABI MIX"}
     HEAL_DROP_CANCEL_CHANCE = 0.0025
     HEAL_SPRITE_BANK = 1
@@ -5802,14 +5805,16 @@ class ShootGame:
     def _spawn_sushi_set(self, spawn_x: float) -> bool:
         if len(self.sushi_sets) >= self.SUSHI_SET_MAX_ACTIVE or len(self.enemies) > 17:
             return False
-        theme = ("salmon", "tuna", "adult")[self.sushi_set_theme_cursor % 3]
+        cursor = self.sushi_set_theme_cursor
+        theme = ("salmon", "tuna", "adult")[cursor % 3]
+        formation = self.SUSHI_SET_FORMATIONS[cursor % len(self.SUSHI_SET_FORMATIONS)]
         self.sushi_set_theme_cursor += 1
         types = {"salmon": ("zigzag",) * 3, "tuna": ("basic",) * 3,
                  "adult": ("zigzag", "basic", "aimer")}[theme]
         center = min(self.WIDTH - 85, max(85, spawn_x))
         group_id = self.next_sushi_set_id
         self.next_sushi_set_id += 1
-        group = SushiEnemySet(group_id, theme, x=center, y=-40)
+        group = SushiEnemySet(group_id, theme, x=center, y=-40, formation=formation)
         self.sushi_sets[group_id] = group
         members = []
         for index, enemy_type in enumerate(types):
@@ -5821,7 +5826,17 @@ class ShootGame:
             enemy.vx = 0.0
             enemy.move_phase = 0.0
             members.append(enemy)
-        # A compact diagonal entry; native enemy HP, scale, hitboxes and shots stay intact.
+        if formation in {"row", "vee"}:
+            entry_y = -max(self.ENEMY_HALF_H * enemy.display_scale for enemy in members)
+            for index, enemy in enumerate(members):
+                enemy.y = entry_y + (18 if formation == "vee" and index == 1 else 0)
+        if formation == "sway":
+            clearance = min(min(enemy.x-self.SIDE_MARGIN-self.ENEMY_HALF_W*enemy.display_scale,
+                                self.WIDTH-self.SIDE_MARGIN-self.ENEMY_HALF_W*enemy.display_scale-enemy.x)
+                            for enemy in members)
+            group.motion_amplitude = max(0.0, min(self.SUSHI_SET_SWAY_AMPLITUDE, clearance))
+        # Placement and a shared lateral motion vary; HP, hitboxes, shots and
+        # the existing common vertical speed remain native and unchanged.
         common_speed = min(enemy.vy for enemy in members)
         for enemy in members:
             enemy.vy = common_speed
@@ -5885,7 +5900,29 @@ class ShootGame:
                 self.enemies.append(self._create_enemy(spawn_x, enemy_type))
             self.spawn_timer = int(60 * self._current_spawn_interval_sec()) * spawn_budget
 
+    def _update_sushi_set_motion(self) -> None:
+        # Advance only alongside enemy simulation, so modal/paused frames
+        # never consume motion. One sine evaluation per moving group.
+        for group in self.sushi_sets.values():
+            if group.state != "active" or group.formation != "sway":
+                continue
+            members = [enemy for enemy in self.enemies if enemy.set_group_id == group.group_id]
+            if not members or any(enemy.state == "retreating" or not enemy.active for enemy in members):
+                continue
+            group.motion_age += 1
+            offset = group.motion_amplitude * math.sin(math.tau * group.motion_age / self.SUSHI_SET_SWAY_PERIOD)
+            dx = offset - group.motion_offset
+            # Clamp the shared displacement as a group; never shear the
+            # formation by pushing just an outer member through the edge.
+            low = max(self.SIDE_MARGIN+self.ENEMY_HALF_W*enemy.display_scale-enemy.x for enemy in members)
+            high = min(self.WIDTH-self.SIDE_MARGIN-self.ENEMY_HALF_W*enemy.display_scale-enemy.x for enemy in members)
+            dx = min(max(dx, low), high)
+            for enemy in members:
+                enemy.x += dx
+            group.motion_offset += dx
+
     def _update_enemies(self) -> None:
+        self._update_sushi_set_motion()
         update_enemies(
             enemies=self.enemies,
             frame_count=self.frame_count,
@@ -6024,16 +6061,17 @@ class ShootGame:
         turn_rate: float,
         speed: float,
     ) -> tuple[float, float]:
+        desired_angle = self._clamp_laser_angle(desired_angle)
         current_angle = math.atan2(vy, vx)
         diff = self._wrap_angle(desired_angle - current_angle)
-        if abs(diff) <= turn_rate * 1.15:
+        if abs(diff) <= turn_rate:
             snapped_angle = self._clamp_laser_angle(desired_angle)
             return math.cos(snapped_angle) * speed, math.sin(snapped_angle) * speed
         step = max(-turn_rate, min(turn_rate, diff))
         rotation = quaternion_from_axis_angle((0.0, 0.0, 1.0), step)
         rotated_x, rotated_y, _ = rotate_vector_by_quaternion((vx, vy, 0.0), rotation)
 
-        rotated_angle = self._clamp_laser_angle(math.atan2(rotated_y, rotated_x))
+        rotated_angle = math.atan2(rotated_y, rotated_x)
         return math.cos(rotated_angle) * speed, math.sin(rotated_angle) * speed
 
     def _find_enemy_by_id(self, enemy_id: int | None) -> Enemy | None:
@@ -6150,15 +6188,10 @@ class ShootGame:
         return best_point
 
     def _force_homing_laser_redirect(self, laser: HomingLaser) -> None:
+        # Collisions can happen several times after steering in one frame.
+        # Invalidate only; the next update reacquires and turns exactly once.
         laser.target_id = None
         laser.reacquire_timer = 0
-        redirect_point = self._find_homing_redirect_point(laser)
-        if redirect_point is None:
-            return
-        target_x, target_y = redirect_point
-        desired_angle = self._clamp_laser_angle(math.atan2(target_y - laser.y, target_x - laser.x))
-        laser.vx = math.cos(desired_angle) * laser.speed
-        laser.vy = math.sin(desired_angle) * laser.speed
 
     def _update_homing_lasers(self) -> None:
         margin = 24
@@ -6194,8 +6227,9 @@ class ShootGame:
                     )
                 else:
                     current_angle = self._clamp_laser_angle(math.atan2(laser.vy, laser.vx))
-                    laser.vx = math.cos(current_angle) * laser.speed
-                    laser.vy = math.sin(current_angle) * laser.speed
+                    laser.vx, laser.vy = self._rotate_homing_velocity_quaternion(
+                        laser.vx, laser.vy, current_angle, laser.turn_rate, laser.speed,
+                    )
 
             laser.x += laser.vx
             laser.y += laser.vy
@@ -6506,13 +6540,47 @@ class ShootGame:
             boss.y + self.BOSS_HITBOX_CENTER_Y_OFFSET,
         )
 
+    @staticmethod
+    def _segment_hits_box(x0, y0, x1, y1, left, top, right, bottom) -> bool:
+        """Slab intersection with the existing radius-expanded hit rectangle."""
+        enter, leave = 0.0, 1.0
+        for origin, delta, low, high in ((x0, x1-x0, left, right), (y0, y1-y0, top, bottom)):
+            if abs(delta) <= 1e-8:
+                if origin < low or origin > high:
+                    return False
+                continue
+            a, b = (low-origin)/delta, (high-origin)/delta
+            if a > b:
+                a, b = b, a
+            enter, leave = max(enter, a), min(leave, b)
+            if enter > leave:
+                return False
+        return True
+
+    def _laser_trail_hits_box(self, laser: HomingLaser, cx, cy, half_w, half_h) -> bool:
+        # These are the actual straight segments used to render the trail.
+        # Retain the previous ten-frame window; include its newest tip.
+        radius = laser.band_width
+        left, right = cx-half_w-radius, cx+half_w+radius
+        top, bottom = cy-half_h-radius, cy+half_h+radius
+        if left <= laser.x <= right and top <= laser.y <= bottom:
+            return True
+        start = max(0, len(laser.trail)-10)
+        for index in range(start+1, len(laser.trail)):
+            x0, y0 = laser.trail[index-1]
+            x1, y1 = laser.trail[index]
+            if self._segment_hits_box(x0, y0, x1, y1, left, top, right, bottom):
+                return True
+        return False
+
     def _is_laser_hitting_enemy(self, laser: HomingLaser, enemy: Enemy) -> bool:
-        sampled_points = laser.trail[-10::2]
-        return any(self._point_hits_enemy(px, py, laser.band_width, enemy) for px, py in sampled_points)
+        if enemy.state == "retreating" or enemy.invincible_timer > 0 or not enemy.active:
+            return False
+        return self._laser_trail_hits_box(laser, enemy.x, enemy.y, enemy.hit_half_w, enemy.hit_half_h)
 
     def _is_laser_hitting_boss(self, laser: HomingLaser, boss: Boss) -> bool:
-        sampled_points = laser.trail[-10::2]
-        return any(self._point_hits_boss(px, py, laser.band_width, boss) for px, py in sampled_points)
+        cx, cy = self._boss_hit_center(boss)
+        return self._laser_trail_hits_box(laser, cx, cy, boss.hit_half_w + self.BOSS_HITBOX_EXTRA_W, boss.hit_half_h)
 
     def _is_echo_hitting_enemy(self, shot: EchoShot, enemy: Enemy) -> bool:
         x0, y0, x1, y1 = self._echo_segment(shot)
